@@ -284,7 +284,7 @@ def pick_device(devices):
 
 
 def _ago(ts):
-    """Format a Unix timestamp as a human-readable 'X ago' string."""
+    """Format a Unix timestamp aas a human-readable 'X ago' string."""
     if not ts:
         return "never"
     diff = int(time.time()) - int(ts)
