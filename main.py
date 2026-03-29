@@ -263,7 +263,7 @@ def send_message(iface, node_id, name):
         print("  Cancelled.")
         return
     try:
-        iface.sendText(f"[{time.strftime('%H:%M')}] {text}", destinationId=node_id, wantAck=True)
+        iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True)
         print("  Sent.")
     except Exception as e:
         print(f"  Failed: {e}")
@@ -285,7 +285,7 @@ def send_repeated(iface, node_id, name):
         count = 0
         while not stop.is_set():
             try:
-                iface.sendText(f"[{time.strftime('%H:%M')}] {text}", destinationId=node_id, wantAck=True)
+                iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True)
                 count += 1
                 print(f"\r  Sent #{count} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
