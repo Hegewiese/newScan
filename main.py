@@ -165,7 +165,15 @@ def _rx_relay(interface, packet) -> str:
     if not relay_byte:
         return ""
     try:
-        for num, node in (interface.nodes or {}).items():
+        # nodesByNum is int-keyed — preferred
+        for num, node in (getattr(interface, "nodesByNum", None) or {}).items():
+            if isinstance(num, int) and (num & 0xFF) == relay_byte:
+                u = node.get("user", {})
+                name = u.get("longName") or u.get("shortName") or f"!{num:08x}"
+                return f"via {name}"
+        # nodes may be keyed by "!hex" strings
+        for key, node in (interface.nodes or {}).items():
+            num = int(key.lstrip("!"), 16) if isinstance(key, str) and key.startswith("!") else key
             if isinstance(num, int) and (num & 0xFF) == relay_byte:
                 u = node.get("user", {})
                 name = u.get("longName") or u.get("shortName") or f"!{num:08x}"
@@ -190,9 +198,13 @@ def start_message_log(iface) -> None:
     from pubsub import pub
     global _rx_subs
 
+    my_num = iface.myInfo.my_node_num
+
     # ── text messages ──────────────────────────────────────────────────────
     def _on_text(packet, interface):
         try:
+            if packet.get("from") == my_num:
+                return
             nodes      = interface.nodes or {}
             sender_num = packet.get("from")
             to_num     = packet.get("to", 0)
@@ -210,6 +222,8 @@ def start_message_log(iface) -> None:
     # ── position ───────────────────────────────────────────────────────────
     def _on_position(packet, interface):
         try:
+            if packet.get("from") == my_num:
+                return
             nodes  = interface.nodes or {}
             sender = _rx_resolve(interface,packet.get("from"))
             relay  = _rx_relay(interface, packet)
@@ -229,6 +243,8 @@ def start_message_log(iface) -> None:
     # ── node info ──────────────────────────────────────────────────────────
     def _on_user(packet, interface):
         try:
+            if packet.get("from") == my_num:
+                return
             nodes  = interface.nodes or {}
             sender = _rx_resolve(interface,packet.get("from"))
             relay  = _rx_relay(interface, packet)
@@ -244,6 +260,8 @@ def start_message_log(iface) -> None:
     # ── telemetry ──────────────────────────────────────────────────────────
     def _on_telemetry(packet, interface):
         try:
+            if packet.get("from") == my_num:
+                return
             nodes  = interface.nodes or {}
             sender = _rx_resolve(interface,packet.get("from"))
             relay  = _rx_relay(interface, packet)
@@ -272,6 +290,8 @@ def start_message_log(iface) -> None:
     # ── neighbor info ──────────────────────────────────────────────────────
     def _on_neighborinfo(packet, interface):
         try:
+            if packet.get("from") == my_num:
+                return
             nodes     = interface.nodes or {}
             sender    = _rx_resolve(interface,packet.get("from"))
             relay     = _rx_relay(interface, packet)
@@ -680,6 +700,7 @@ def send_repeated(iface, node_id, name):
 
 
 TRACEROUTE_TIMEOUT = 30  # seconds
+PING_TIMEOUT       = 10  # seconds
 _UNK_SNR = -128  # meshtastic sentinel for unknown SNR
 
 
@@ -855,6 +876,54 @@ def tracer_repeated(iface, node_id, name):
         print("  Stopped.")
 
 
+def ping_favorites(iface, favorites):
+    """Ping all favorite nodes via NodeInfo request; return {node_id: responded} dict."""
+    from meshtastic.protobuf import portnums_pb2
+
+    if not favorites:
+        return {}
+
+    responded = {node_id: False for node_id, _ in favorites}
+    lock = threading.Lock()
+
+    print(f"\n  Pinging {len(favorites)} node(s)...\n")
+    log.info(f"⌁ Ping favorites started: {len(favorites)} node(s)")
+
+    for node_id, peer in favorites:
+        name = _peer_name(peer)
+
+        def _on_response(packet, _nid=node_id, _nm=name):
+            with lock:
+                responded[_nid] = True
+            log.info(f"⌁ ping response from {_nm} ({_nid})")
+
+        try:
+            iface.sendData(
+                b'',
+                destinationId=node_id,
+                portNum=portnums_pb2.PortNum.NODEINFO_APP,
+                wantResponse=True,
+                onResponse=_on_response,
+            )
+            log.info(f"⌁ ping (nodeinfo request) sent to {name} ({node_id})")
+        except Exception as e:
+            log.warning(f"⌁ ping to {name} ({node_id}) failed to send: {e}")
+
+    bar_width = 40
+    tick      = 0.1
+    steps     = int(PING_TIMEOUT / tick)
+    for i in range(steps + 1):
+        filled = int(bar_width * i / steps)
+        bar    = "#" * filled + "-" * (bar_width - filled)
+        print(f"\r  Waiting for responses... [{bar}] {i * tick:4.1f}s", end="", flush=True)
+        time.sleep(tick)
+    print()
+
+    ok = sum(1 for v in responded.values() if v)
+    log.info(f"⌁ Ping favorites done: {ok}/{len(favorites)} responded")
+    return responded
+
+
 def show_node_info(iface):
     """Print info about the connected node and visible mesh peers."""
     my_num = iface.myInfo.my_node_num
@@ -872,6 +941,11 @@ def show_node_info(iface):
 
     header = f"{node_name}  |  !{my_num:08x}  |  fw {fw}  |  hw {hw}"
 
+    _GREEN  = "\033[32m"
+    _ORANGE = "\033[33m"
+    _RESET  = "\033[0m"
+    ping_results = {}  # {node_id: bool} — populated after 'pf' command
+
     def print_main():
         clear_screen()
         print("=" * len(header))
@@ -883,16 +957,20 @@ def show_node_info(iface):
         names = [_peer_name(p) for _, p in favorites]
         name_w = max(len(n) for n in names)
         print(f"\nFavorite peers: {len(favorites)} of {len(all_peers)} visible\n")
-        for i, (_, p) in enumerate(favorites, 1):
+        for i, (node_id, p) in enumerate(favorites, 1):
             name = _peer_name(p).ljust(name_w)
             last = _ago(p.get("lastHeard"))
             snr  = p.get("snr", "N/A")
             hops = p.get("hopsAway")
             hops_str = "direct" if hops == 0 else f"{hops} hops" if hops is not None else "N/A"
-            print(f"  [{i}] {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
+            if node_id in ping_results:
+                dot = f"{_GREEN}●{_RESET}" if ping_results[node_id] else f"{_ORANGE}●{_RESET}"
+                print(f"  [{i}] {dot} {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
+            else:
+                print(f"  [{i}]   {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
         c = 22
         print(f"\n  {'d<n> Node Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}Enter to quit"
-              f"\n  {''.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}e Export config")
+              f"\n  {'pf  Ping Favorites'.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}e Export config")
 
     print_main()
 
@@ -902,10 +980,20 @@ def show_node_info(iface):
     while True:
         choice = input("  > ").strip().lower()
         if not choice:
-            return
+            confirm = input("  Really quit? [y/N]: ").strip().lower()
+            if confirm == "y":
+                return
+            print_main()
+            continue
         if choice == "e":
             clear_screen()
             export_node_config(iface)
+            print_main()
+            continue
+        if choice == "pf":
+            clear_screen()
+            results = ping_favorites(iface, favorites)
+            ping_results.update(results)
             print_main()
             continue
         if choice[:2] == "rt":
