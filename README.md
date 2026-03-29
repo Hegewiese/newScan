@@ -12,14 +12,18 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - **Smart device discovery** — checks for already-paired Meshtastic devices instantly via `bluetoothctl`, skipping a full BLE scan when possible
 - **BLE scan with progress bar** — performs a 10-second BLE scan with a live progress bar when no paired device is found
 - **Fast connection** — connects using `find_device_by_address` instead of a full rescan, cutting connection time significantly
-- **Connection spinner** — animated spinner with elapsed time while the BLE + mesh handshake completes
-- **Favorite nodes list** — shows only nodes marked as favorites on the connected device, with last-seen time, SNR and hop count
+- **Connection spinner** — animated spinner with elapsed time while the BLE + mesh connection completes
+- **Node header** — after connecting the screen clears and shows a single-line header with the node's name, hex ID, firmware version, and hardware model
+- **Favorite nodes list** — shows only nodes marked as favorites on the connected device, with last-seen time, SNR, and hop count
 - **Node details** — drill into any favorite node for full info: ID, short name, last seen, SNR, hops away, GPS position, battery level and voltage
-- **Send a message** — send a single text message to any favorite node through the mesh; each message is automatically prefixed with a `[HH:MM:SS]` timestamp
-- **Repeat send** — send a message repeatedly at a configurable interval (default 10 s); press Enter to stop
-- **Navigate freely** — after viewing details or sending a message, the favorite list is reprinted and you can pick another node or quit
-- **Activity log** — all major events and exceptions are written to `newscan.log` with full timestamps
-
+- **Send a message** — send a single text message to any favorite node through the mesh; each message is automatically prefixed with a `[HH:MM:SS]` timestamp; acknowledgement (ACK/NAK) is shown on screen and written to the log when the mesh responds
+- **Repeat send** — send a message repeatedly at a configurable interval (default 10 s); each transmission reports ACK/NAK; press Enter to stop
+- **Tracer** — send a single traceroute to any favorite node with a configurable hop limit and a live progress bar; full route details (hops, per-hop SNR, rxSNR, rxRSSI) are written to the log
+- **Repeat tracer** — send traceroutes repeatedly at a configurable interval; full route details logged for each run; press Enter to stop
+- **Config export** — export the connected node's `localConfig`, `moduleConfig`, and channel settings to a timestamped JSON file
+- **Clear screen on every action** — each menu action starts on a clean screen; returning from any action restores the full main view automatically
+- **Live log footer** — the bottom 6 rows of the terminal are permanently reserved for a `── LOGs ──` divider and the last 5 lines of `newscan.log`, updated in real time via `tail -f`
+- **Activity log** — all major events (messages sent, ACK/NAK, tracer routes and metrics, config exports, errors) are written to `newscan.log` with full timestamps
 
 ---
 
@@ -56,8 +60,6 @@ sudo usermod -aG bluetooth $USER
 
 **Bluetooth permission:** On first run macOS will ask for permission to use Bluetooth. You must grant access to Terminal (or whichever app you use) in:
 `System Settings → Privacy & Security → Bluetooth`
-
-If the scan finds nothing, check that Bluetooth is enabled and that the terminal app has Bluetooth permission.
 
 **Install Python via Homebrew (recommended):**
 ```bash
@@ -112,17 +114,14 @@ Checking requirements...
   [ OK ] Bluetooth: adapter powered on
 ```
 
-### Main menu
+### Main view
 
-After connecting, local node info is displayed followed by a list of **favorite peers**:
+After connecting the screen clears and the node header is shown on one line, followed by the favorite peers list and a grouped command menu:
 
 ```
-==================================================
-LOCAL NODE
-==================================================
-Node number : 123456789
-Firmware    : 2.5.x
-Hardware    : HELTEC_V3
+================================================================
+MyNode Base  |  !04332f58  |  fw 2.5.x  |  hw HELTEC_V3
+================================================================
 
 Favorite peers: 3 of 18 visible
 
@@ -130,28 +129,97 @@ Favorite peers: 3 of 18 visible
   [2] Bob          15m ago      SNR: -8.5   2 hops
   [3] Charlie      1h ago       SNR: N/A    N/A
 
-  d<n> Details   m<n> Message   r<n> Repeat msg   Enter to quit
-  >
+  d<n> Details          m<n> Message          t<n> tracer         Enter to quit
+                        r<n> Repeat msg        rt<n> Repeat trace  e Export config
+
+── LOGs ─────────────────────────────────────────────────────────
+2026-03-29 12:09:17  INFO      tracer [Alice] towards:  !04332f58 --> !aabbccdd(2.25dB) --> !deadbeef(3.50dB)
+2026-03-29 12:09:17  INFO      tracer [Alice] back:     !deadbeef --> !aabbccdd(1.75dB) --> !04332f58(4.00dB)
+2026-03-29 12:09:17  INFO      tracer [Alice] metrics:  pktId=12345678, rxSNR=3.5dB, rxRSSI=-87dBm, hopStart=3
+2026-03-29 12:09:22  INFO      Message sent to Bob (!deadbeef): 'Hello'
+2026-03-29 12:09:23  INFO      ACK received from Bob (!deadbeef)
 ```
+
+The bottom 6 rows — the `── LOGs ──` divider and the last 5 log lines — are always visible regardless of what the rest of the screen is doing. They update automatically as new entries are written to `newscan.log`.
+
+### Menu commands
 
 | Command | Action |
 |---|---|
 | `d<n>` | Show full details for node n (ID, position, battery, …) |
-| `m<n>` | Send a single message to node n |
-| `r<n>` | Send a message to node n repeatedly at a chosen interval |
+| `m<n>` | Send a single message to node n; ACK/NAK reported when received |
+| `r<n>` | Send a message to node n repeatedly at a chosen interval; ACK/NAK per send |
+| `t<n>` | Send a single tracer to node n; full route logged |
+| `rt<n>` | Send tracers to node n repeatedly at a chosen interval; full route logged each time |
+| `e` | Export the connected node's config to a JSON file |
 | Enter | Quit and disconnect |
 
-### Repeat send
+Every action clears the screen before running and restores the full main view when it returns.
+
+### Messaging and acknowledgements
 
 ```
-  > r2
-  Repeated message to Bob
-  Message: Ping!
-  Interval in seconds [10]: 5
-  Sent #4 to Bob. Press Enter to stop.
+  > m2
+  Sending message to Bob
+  Message: Hello there
+  Sent. (Waiting for ACK...)
+
+  ACK received from Bob.
 ```
 
-Press **Enter** at any time to stop the loop and return to the menu.
+For repeated sends each transmission shows its sequence number and ACK/NAK as they arrive:
+
+```
+  Sent #3 to Bob. Press Enter to stop.
+  ACK #2 from Bob.
+```
+
+### Tracer
+
+```
+  > t1
+  Traceroute to Alice
+  Hop limit [3]: 3
+
+  Waiting for route... [########################################]  4.2s
+  Success.
+```
+
+The library prints the hop-by-hop route to the screen. Full details are also written to the log:
+
+```
+tracer [Alice] towards:  !04332f58 --> !aabbccdd(2.25dB) --> !deadbeef(3.50dB)
+tracer [Alice] back:     !deadbeef --> !aabbccdd(1.75dB) --> !04332f58(4.00dB)
+tracer [Alice] metrics:  pktId=12345678, rxSNR=3.5dB, rxRSSI=-87dBm, hopStart=3
+```
+
+Unknown SNR values are shown as `?`. The back route is only logged when the remote node returns it.
+
+### Repeat tracer
+
+```
+  > rt1
+  Repeated traceroute to Alice
+  Hop limit [3]: 3
+  Interval in seconds [30]: 60
+
+  --- tracer #1 to Alice ---
+  Waiting for route... [########################################]  4.2s
+  Next in 60s — press Enter to stop.
+```
+
+Press **Enter** at any time to stop and return to the main view.
+
+### Config export
+
+Press `e` at the main menu to export the connected node's full configuration to a JSON file in the project directory:
+
+```
+  > e
+  Config exported: MyNode_20260329_143022_config.json
+```
+
+The file contains three top-level keys: `localConfig`, `moduleConfig`, and `channels`. Useful for backup, diffing settings between nodes, or restoring a configuration.
 
 ---
 
@@ -159,8 +227,9 @@ Press **Enter** at any time to stop the loop and return to the menu.
 
 ```
 newscan/
-├── main.py           # Single-file application
-├── newscan.log       # Activity log (auto-created, excluded from git)
+├── main.py                              # Single-file application
+├── newscan.log                          # Activity log (auto-created, excluded from git)
+├── <NodeName>_<timestamp>_config.json  # Exported node configs (auto-created, excluded from git)
 └── README.md
 ```
 
@@ -173,17 +242,19 @@ Each line contains a timestamp, severity level, and message:
 ```
 2026-03-29 14:23:01  INFO      === newscan starting ===
 2026-03-29 14:23:01  INFO      Preflight: platform=Linux
-2026-03-29 14:23:01  INFO      Preflight: Python 3.12.3
-2026-03-29 14:23:01  INFO      Preflight: venv=meshtastic_venv
-2026-03-29 14:23:01  INFO      Bluetooth preflight: adapter powered on
-2026-03-29 14:23:02  INFO      Found known device: Meshtastic [AA:BB:CC:DD:EE:FF]
 2026-03-29 14:23:04  INFO      Connecting to Meshtastic [AA:BB:CC:DD:EE:FF]
 2026-03-29 14:23:07  INFO      Connected to Meshtastic [AA:BB:CC:DD:EE:FF]
-2026-03-29 14:23:09  INFO      Message sent to Alice (123456): 'Hello'
+2026-03-29 14:23:09  INFO      Message sent to Alice (!04332f58): 'Hello'
+2026-03-29 14:23:10  INFO      ACK received from Alice (!04332f58)
+2026-03-29 14:24:00  INFO      tracer [Alice] towards:  !04332f58 --> !aabbccdd(2.25dB) --> !deadbeef(3.50dB)
+2026-03-29 14:24:00  INFO      tracer [Alice] back:     !deadbeef --> !aabbccdd(1.75dB) --> !04332f58(4.00dB)
+2026-03-29 14:24:00  INFO      tracer [Alice] metrics:  pktId=12345678, rxSNR=3.5dB, rxRSSI=-87dBm, hopStart=3
 2026-03-29 14:25:00  INFO      === newscan session ended ===
 ```
 
 Exceptions are logged at `ERROR` level and include the full stack trace.
+
+The last 5 log lines are also displayed live at the bottom of the terminal, below the `── LOGs ──` divider, so you can monitor activity without leaving the main view.
 
 ---
 
@@ -211,5 +282,6 @@ Before using this tool, make sure your Meshtastic device has:
 ## Known limitations
 
 - Receiving incoming messages is not yet implemented
-- Repeat send runs until manually stopped; no maximum count option yet
+- Repeat send and repeat tracer run until manually stopped; no maximum count option yet
 - Paired-device fast-lookup requires `bluetoothctl` (Linux only); macOS always falls back to a full scan
+- Config export covers `localConfig`, `moduleConfig`, and channels only; node database and PKI keys are not included

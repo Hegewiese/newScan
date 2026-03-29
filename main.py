@@ -7,6 +7,7 @@ Copyright by me
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -40,6 +41,96 @@ logging.basicConfig(
 )
 log = logging.getLogger("newscan")
 log.setLevel(logging.DEBUG)  # our own logger always writes in full detail
+
+# ---------------------------------------------------------------------------
+# Fixed log-tail footer
+# ---------------------------------------------------------------------------
+_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "newscan.log")
+_TAIL_LINES = 5
+_FOOTER_ROWS = _TAIL_LINES + 1          # separator row + 5 log lines
+_tail_cache: list = []
+_tail_lock = threading.Lock()
+_tail_proc = None
+
+
+def _redraw_log_footer() -> None:
+    """Overwrite the pinned footer rows without disturbing the cursor."""
+    try:
+        cols, rows = shutil.get_terminal_size()
+    except Exception:
+        return
+    with _tail_lock:
+        lines = list(_tail_cache)
+    buf = "\0337"                        # DECSC — save cursor
+    sep_row = rows - _FOOTER_ROWS + 1
+    label = " LOGs "
+    buf += f"\033[{sep_row};1H\033[K" + "─" * 2 + label + "─" * max(0, cols - 2 - len(label))
+    for i in range(_TAIL_LINES):
+        row = sep_row + 1 + i
+        text = lines[i] if i < len(lines) else ""
+        buf += f"\033[{row};1H\033[K{text[:cols]}"
+    buf += "\0338"                       # DECRC — restore cursor
+    sys.stdout.write(buf)
+    sys.stdout.flush()
+
+
+def _setup_scroll_region() -> None:
+    """Restrict terminal scrolling to the rows above the footer."""
+    try:
+        rows = shutil.get_terminal_size().lines
+    except Exception:
+        return
+    sys.stdout.write(f"\033[1;{rows - _FOOTER_ROWS}r")
+    sys.stdout.flush()
+    _redraw_log_footer()
+
+
+def _tail_worker() -> None:
+    global _tail_proc
+    try:
+        _tail_proc = subprocess.Popen(
+            ["tail", "-n", str(_TAIL_LINES), "-f", _LOG_PATH],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+        )
+        for raw in _tail_proc.stdout:
+            line = raw.rstrip("\n")
+            with _tail_lock:
+                _tail_cache.append(line)
+                if len(_tail_cache) > _TAIL_LINES:
+                    del _tail_cache[:-_TAIL_LINES]
+            _redraw_log_footer()
+    except Exception:
+        pass
+
+
+def start_log_tail() -> None:
+    threading.Thread(target=_tail_worker, daemon=True).start()
+    _setup_scroll_region()
+
+
+def stop_log_tail() -> None:
+    global _tail_proc
+    if _tail_proc is not None:
+        try:
+            _tail_proc.terminate()
+        except Exception:
+            pass
+        _tail_proc = None
+    try:
+        rows = shutil.get_terminal_size().lines
+        sys.stdout.write(f"\033[r\033[{rows};1H\n")
+        sys.stdout.flush()
+    except Exception:
+        pass
+
+
+def clear_screen() -> None:
+    """Clear the scrolling region and re-establish the pinned footer."""
+    sys.stdout.write("\033[H\033[2J")
+    sys.stdout.flush()
+    _setup_scroll_region()
+
+# ---------------------------------------------------------------------------
 
 
 def _check_bt_linux():
@@ -309,10 +400,21 @@ def send_message(iface, node_id, name):
         log.info(f"send_message to {name} ({node_id}): cancelled (empty input)")
         print("  Cancelled.")
         return
+
+    def onAckNak(packet):
+        routing = packet.get("decoded", {}).get("routing", {})
+        error = routing.get("errorReason", "NONE")
+        if error == "NONE":
+            log.info(f"ACK received from {name} ({node_id})")
+            print(f"\n  ACK received from {name}.")
+        else:
+            log.warning(f"NAK from {name} ({node_id}): {error}")
+            print(f"\n  NAK from {name}: {error}")
+
     try:
-        iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True)
+        iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
         log.info(f"Message sent to {name} ({node_id}): {text!r}")
-        print("  Sent.")
+        print("  Sent. (Waiting for ACK...)")
     except Exception as e:
         log.exception(f"send_message to {name} ({node_id}) failed: {e}")
         print(f"  Failed: {e}")
@@ -335,14 +437,26 @@ def send_repeated(iface, node_id, name):
     def _send_loop():
         count = 0
         while not stop.is_set():
+            count += 1
+            current = count
+
+            def onAckNak(packet, _c=current):
+                routing = packet.get("decoded", {}).get("routing", {})
+                error = routing.get("errorReason", "NONE")
+                if error == "NONE":
+                    log.info(f"ACK received for repeated message #{_c} from {name} ({node_id})")
+                    print(f"\n  ACK #{_c} from {name}.", flush=True)
+                else:
+                    log.warning(f"NAK for repeated message #{_c} from {name} ({node_id}): {error}")
+                    print(f"\n  NAK #{_c} from {name}: {error}", flush=True)
+
             try:
-                iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True)
-                count += 1
-                log.info(f"Repeated message #{count} sent to {name} ({node_id})")
-                print(f"\r  Sent #{count} to {name}. Press Enter to stop.", end="", flush=True)
+                iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
+                log.info(f"Repeated message #{current} sent to {name} ({node_id})")
+                print(f"\r  Sent #{current} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
-                log.exception(f"Repeated message #{count + 1} to {name} ({node_id}) failed: {e}")
-                print(f"\r  Send #{count + 1} failed: {e}")
+                log.exception(f"Repeated message #{current} to {name} ({node_id}) failed: {e}")
+                print(f"\r  Send #{current} failed: {e}")
             stop.wait(interval)
 
     t = threading.Thread(target=_send_loop, daemon=True)
@@ -355,16 +469,80 @@ def send_repeated(iface, node_id, name):
 
 
 TRACEROUTE_TIMEOUT = 30  # seconds
+_UNK_SNR = -128  # meshtastic sentinel for unknown SNR
 
 
-def _traceroute_with_bar(iface, node_id, hop_limit):
+def _log_tracer_details(packet: dict, name: str) -> None:
+    """Write every available field of a tracer response packet to the log."""
+    from pubsub import pub  # noqa: F401 (already imported by meshtastic; just use it)
+
+    tr = packet.get("decoded", {}).get("traceroute", {})
+    frm        = packet.get("from",     "?")
+    to         = packet.get("to",       "?")
+    pkt_id     = packet.get("id",       "?")
+    rx_snr     = packet.get("rxSnr")
+    rx_rssi    = packet.get("rxRssi")
+    hop_start  = packet.get("hopStart")
+    hop_limit  = packet.get("hopLimit")
+
+    route        = tr.get("route",       [])
+    snr_towards  = tr.get("snrTowards",  [])
+    route_back   = tr.get("routeBack",   [])
+    snr_back     = tr.get("snrBack",     [])
+
+    def _n(num):
+        return f"!{num:08x}" if isinstance(num, int) else str(num)
+
+    def _snr(raw):
+        return "?" if raw == _UNK_SNR else f"{raw / 4:.2f}dB"
+
+    # --- towards route --------------------------------------------------
+    parts = [_n(to)]
+    for i, n in enumerate(route):
+        snr = _snr(snr_towards[i]) if i < len(snr_towards) else "?"
+        parts.append(f"{_n(n)}({snr})")
+    last_snr = _snr(snr_towards[-1]) if snr_towards else "?"
+    parts.append(f"{_n(frm)}({last_snr})")
+    log.info(f"tracer [{name}] towards:  {' --> '.join(parts)}")
+
+    # --- back route (only if present) -----------------------------------
+    if route_back or snr_back:
+        bp = [_n(frm)]
+        for i, n in enumerate(route_back):
+            snr = _snr(snr_back[i]) if i < len(snr_back) else "?"
+            bp.append(f"{_n(n)}({snr})")
+        last_snr_back = _snr(snr_back[-1]) if snr_back else "?"
+        bp.append(f"{_n(to)}({last_snr_back})")
+        log.info(f"tracer [{name}] back:     {' --> '.join(bp)}")
+
+    # --- packet-level metrics -------------------------------------------
+    extras = [f"pktId={pkt_id}"]
+    if rx_snr  is not None: extras.append(f"rxSNR={rx_snr}dB")
+    if rx_rssi is not None: extras.append(f"rxRSSI={rx_rssi}dBm")
+    if hop_start is not None: extras.append(f"hopStart={hop_start}")
+    if hop_limit is not None: extras.append(f"hopLimit={hop_limit}")
+    log.info(f"tracer [{name}] metrics:  {', '.join(extras)}")
+
+
+def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
     """Run sendTraceRoute in a thread and show a progress bar while waiting.
 
     The library prints the route result itself when the response arrives.
+    Logs full tracer details via pub/sub.
     Returns (success: bool, error: str|None).
     """
-    result = {"ok": None, "error": None}
-    done = threading.Event()
+    from pubsub import pub
+
+    result  = {"ok": None, "error": None}
+    done    = threading.Event()
+    pkt_evt = threading.Event()
+    captured = [None]
+
+    def _on_tracer(packet, interface):
+        captured[0] = packet
+        pkt_evt.set()
+
+    pub.subscribe(_on_tracer, "meshtastic.receive.traceroute")
 
     def _run():
         try:
@@ -388,8 +566,17 @@ def _traceroute_with_bar(iface, node_id, hop_limit):
             break
         time.sleep(tick)
 
-    print()  # end the progress bar line
-    done.wait(timeout=1)  # brief grace period for the thread to finish
+    print()
+    done.wait(timeout=1)
+    pkt_evt.wait(timeout=2)  # let the pub/sub thread deliver the packet
+
+    try:
+        pub.unsubscribe(_on_tracer, "meshtastic.receive.traceroute")
+    except Exception:
+        pass
+
+    if captured[0] is not None:
+        _log_tracer_details(captured[0], name)
 
     if result["ok"] is True:
         return True, None
@@ -399,30 +586,30 @@ def _traceroute_with_bar(iface, node_id, hop_limit):
         return False, f"timed out after {TRACEROUTE_TIMEOUT}s"
 
 
-def traceroute_node(iface, node_id, name):
-    """Send a single traceroute to the given node and print the result."""
-    print(f"\n  Traceroute to {name}")
+def tracer_node(iface, node_id, name):
+    """Send a single tracer to the given node and print the result."""
+    print(f"\n  tracer to {name}")
     hop_str = input("  Hop limit [3]: ").strip()
     hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
-    log.info(f"Traceroute to {name} ({node_id}), hop_limit={hop_limit}")
+    log.info(f"tracer to {name} ({node_id}), hop_limit={hop_limit}")
     print()
-    success, err = _traceroute_with_bar(iface, node_id, hop_limit)
+    success, err = _tracer_with_bar(iface, node_id, hop_limit, name=name)
     if success:
-        log.info(f"Traceroute to {name} ({node_id}) completed successfully")
+        log.info(f"tracer to {name} ({node_id}) completed successfully")
         print("  Success.")
     else:
-        log.error(f"Traceroute to {name} ({node_id}) failed: {err}")
+        log.error(f"tracer to {name} ({node_id}) failed: {err}")
         print(f"  Failed: {err}")
 
 
-def traceroute_repeated(iface, node_id, name):
-    """Send a traceroute repeatedly at a configurable interval until Enter is pressed."""
-    print(f"\n  Repeated traceroute to {name}")
+def tracer_repeated(iface, node_id, name):
+    """Send a tracer repeatedly at a configurable interval until Enter is pressed."""
+    print(f"\n  Repeated tracer to {name}")
     hop_str = input("  Hop limit [3]: ").strip()
     hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
     interval_str = input("  Interval in seconds [30]: ").strip()
     interval = int(interval_str) if interval_str.isdigit() else 30
-    log.info(f"Repeated traceroute to {name} ({node_id}) started: hop_limit={hop_limit}, interval={interval}s")
+    log.info(f"Repeated tracer to {name} ({node_id}) started: hop_limit={hop_limit}, interval={interval}s")
 
     stop = threading.Event()
     last_result = {"count": 0, "success": None}
@@ -431,13 +618,13 @@ def traceroute_repeated(iface, node_id, name):
         while not stop.is_set():
             last_result["count"] += 1
             count = last_result["count"]
-            print(f"\n  --- Traceroute #{count} to {name} ---")
-            success, err = _traceroute_with_bar(iface, node_id, hop_limit)
+            print(f"\n  --- tracer #{count} to {name} ---")
+            success, err = _tracer_with_bar(iface, node_id, hop_limit, name=name)
             last_result["success"] = success
             if success:
-                log.info(f"Repeated traceroute #{count} to {name} ({node_id}) completed")
+                log.info(f"Repeated tracer #{count} to {name} ({node_id}) completed")
             else:
-                log.error(f"Repeated traceroute #{count} to {name} ({node_id}) failed: {err}")
+                log.error(f"Repeated tracer #{count} to {name} ({node_id}) failed: {err}")
                 print(f"  Failed: {err}")
             if not stop.is_set():
                 print(f"  Next in {interval}s — press Enter to stop.")
@@ -448,11 +635,11 @@ def traceroute_repeated(iface, node_id, name):
     input()
     stop.set()
     t.join(timeout=3)
-    log.info(f"Repeated traceroute to {name} ({node_id}) stopped")
+    log.info(f"Repeated tracer to {name} ({node_id}) stopped")
     if last_result["success"] is True:
-        print(f"  Stopped. Last traceroute #{last_result['count']}: success.")
+        print(f"  Stopped. Last tracer #{last_result['count']}: success.")
     elif last_result["success"] is False:
-        print(f"  Stopped. Last traceroute #{last_result['count']}: failed.")
+        print(f"  Stopped. Last tracer #{last_result['count']}: failed.")
     else:
         print("  Stopped.")
 
@@ -461,30 +648,27 @@ def show_node_info(iface):
     """Print info about the connected node and visible mesh peers."""
     my_num = iface.myInfo.my_node_num
     metadata = iface.metadata
+    node_name = iface.getLongName() or "Unknown"
+    fw = metadata.firmware_version if metadata else "N/A"
+    hw = metadata.hw_model if metadata else "N/A"
 
-    log.info(f"Local node number: {my_num}")
-    if metadata:
-        log.info(f"Firmware: {metadata.firmware_version}  Hardware: {metadata.hw_model}")
-
-    print("\n" + "=" * 50)
-    print("LOCAL NODE")
-    print("=" * 50)
-    print(f"Node number : {my_num}")
-    if metadata:
-        print(f"Firmware    : {metadata.firmware_version}")
-        print(f"Hardware    : {metadata.hw_model}")
+    log.info(f"Local node: {node_name}  !{my_num:08x}  fw {fw}  hw {hw}")
 
     nodes = iface.nodes or {}
     all_peers = [(k, v) for k, v in nodes.items() if k != my_num]
     favorites = [(k, v) for k, v in all_peers if v.get("isFavorite")]
     log.info(f"Peers visible: {len(all_peers)}  favorites: {len(favorites)}")
 
-    if not favorites:
-        log.info("No favorite nodes visible")
-        print("\nNo favorite nodes visible yet.")
-        return
+    header = f"{node_name}  |  !{my_num:08x}  |  fw {fw}  |  hw {hw}"
 
-    def print_favorites():
+    def print_main():
+        clear_screen()
+        print("=" * len(header))
+        print(header)
+        print("=" * len(header))
+        if not favorites:
+            print("\nNo favorite nodes visible yet.")
+            return
         names = [_peer_name(p) for _, p in favorites]
         name_w = max(len(n) for n in names)
         print(f"\nFavorite peers: {len(favorites)} of {len(all_peers)} visible\n")
@@ -495,18 +679,23 @@ def show_node_info(iface):
             hops = p.get("hopsAway")
             hops_str = "direct" if hops == 0 else f"{hops} hops" if hops is not None else "N/A"
             print(f"  [{i}] {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
-        print(f"\n  d<n> Details   m<n> Message   r<n> Repeat msg   t<n> Traceroute   rt<n> Repeat trace   e Export config   Enter to quit")
+        c = 22
+        print(f"\n  {'d<n> Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}Enter to quit"
+              f"\n  {''.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}e Export config")
 
-    print_favorites()
+    print_main()
+
+    if not favorites:
+        return
 
     while True:
         choice = input("  > ").strip().lower()
         if not choice:
             return
         if choice == "e":
+            clear_screen()
             export_node_config(iface)
-            print()
-            print_favorites()
+            print_main()
             continue
         if choice[:2] == "rt":
             action, num = "rt", choice[2:]
@@ -517,25 +706,25 @@ def show_node_info(iface):
         if num.isdigit() and 1 <= int(num) <= len(favorites):
             node_id, peer = favorites[int(num) - 1]
             if action == "d":
+                clear_screen()
                 show_peer_detail(peer)
-                print()
-                print_favorites()
+                print_main()
             elif action == "m":
+                clear_screen()
                 send_message(iface, node_id, _peer_name(peer))
-                print()
-                print_favorites()
+                print_main()
             elif action == "r":
+                clear_screen()
                 send_repeated(iface, node_id, _peer_name(peer))
-                print()
-                print_favorites()
+                print_main()
             elif action == "t":
-                traceroute_node(iface, node_id, _peer_name(peer))
-                print()
-                print_favorites()
+                clear_screen()
+                tracer_node(iface, node_id, _peer_name(peer))
+                print_main()
             elif action == "rt":
-                traceroute_repeated(iface, node_id, _peer_name(peer))
-                print()
-                print_favorites()
+                clear_screen()
+                tracer_repeated(iface, node_id, _peer_name(peer))
+                print_main()
         else:
             print("  Invalid — try d1, m2, r3, t4, rt4, or Enter to quit.")
 
@@ -698,12 +887,14 @@ def main():
     log.info(f"Connected to {device.name} [{device.address}]")
     print(f"\r  Connected to {device.name or device.address}.{' ' * 20}")
 
+    start_log_tail()
     try:
         show_node_info(iface)
     except Exception as e:
         log.exception(f"Unexpected error in session: {e}")
         raise
     finally:
+        stop_log_tail()
         log.info("Closing connection")
         print("\nClosing connection...")
         t = threading.Thread(target=iface.close, daemon=True)
