@@ -22,8 +22,8 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - **Repeat tracer** — send traceroutes repeatedly at a configurable interval; full route details logged for each run; press Enter to stop
 - **Config export** — export the connected node's `localConfig`, `moduleConfig`, and channel settings to a timestamped JSON file
 - **Clear screen on every action** — each menu action starts on a clean screen; returning from any action restores the full main view automatically
-- **Live log footer** — the bottom 6 rows of the terminal are permanently reserved for a `── LOGs ──` divider and the last 5 lines of `newscan.log`, updated in real time via `tail -f`
-- **Activity log** — all major events (messages sent, ACK/NAK, tracer routes and metrics, config exports, errors) are written to `newscan.log` with full timestamps
+- **Live log footer** — the bottom 9 rows of the terminal are permanently reserved for a `── LOGs ──` divider and the last 8 lines of `newscan.log`, updated in real time via `tail -f`; newest entry appears at the top of the footer
+- **Activity log** — all major events (messages sent/received, ACK/NAK, tracer routes and metrics, position updates, node info, telemetry, neighbor info, config exports, errors) are written to `newscan.log` with full timestamps and per-type symbols
 
 ---
 
@@ -140,7 +140,7 @@ Favorite peers: 3 of 18 visible
 2026-03-29 12:09:23  INFO      ACK received from Bob (!deadbeef)
 ```
 
-The bottom 6 rows — the `── LOGs ──` divider and the last 5 log lines — are always visible regardless of what the rest of the screen is doing. They update automatically as new entries are written to `newscan.log`.
+The bottom 9 rows — the `── LOGs ──` divider and the last 8 log lines — are always visible regardless of what the rest of the screen is doing. They update automatically as new entries are written to `newscan.log`.
 
 ### Menu commands
 
@@ -254,7 +254,24 @@ Each line contains a timestamp, severity level, and message:
 
 Exceptions are logged at `ERROR` level and include the full stack trace.
 
-The last 5 log lines are also displayed live at the bottom of the terminal, below the `── LOGs ──` divider, so you can monitor activity without leaving the main view.
+The last 8 log lines are also displayed live at the bottom of the terminal, below the `── LOGs ──` divider (newest first), so you can monitor activity without leaving the main view.
+
+### Received packet types
+
+All incoming packets are logged automatically with a distinctive symbol, the sender name, the last relay node (where identifiable), and signal quality:
+
+| Symbol | Type | Example log line |
+|---|---|---|
+| `✉` | Text — broadcast | `✉ CH0 Short Slow  Alice via Relay1 -> broadcast: 'Hallo!'  [snr=3.5dB]` |
+| `✉` (red) | Text — direct | `✉ CH0 Short Slow  Alice -> MyNode: 'Direct msg'  [snr=5dB]` |
+| `⊕` | Position update | `⊕ CH0 Short Slow  Alice via Relay1: lat=48.12345  lon=11.54321  alt=520m` |
+| `◉` | Node info | `◉ CH0 Short Slow  Alice: long=Alice Base  short=ALCE  hw=HELTEC_V3` |
+| `⊡` | Telemetry (device) | `⊡ CH0 Short Slow  Alice: bat=87%  volt=3.92V  chUtil=4.2%  up=3600s` |
+| `⊛` | Telemetry (env) | `⊛ CH0 Short Slow  Alice: temp=21.5°C  hum=62.0%  pres=1013.2hPa` |
+| `⬡` | Neighbor info | `⬡ CH0 Short Slow  Alice via Relay1: 3 neighbors: Bob, Charlie, Dave` |
+| `⇌` | Traceroute | `⇌ CH0 Short Slow  Bob -> Charlie  [snr=2.0dB]` |
+
+The relay node (`via …`) is resolved from the last 8 bits of the `relayNode` field matched against the known node database.
 
 ---
 
@@ -281,7 +298,6 @@ Before using this tool, make sure your Meshtastic device has:
 
 ## Known limitations
 
-- Receiving incoming messages is not yet implemented
 - Repeat send and repeat tracer run until manually stopped; no maximum count option yet
 - Paired-device fast-lookup requires `bluetoothctl` (Linux only); macOS always falls back to a full scan
 - Config export covers `localConfig`, `moduleConfig`, and channels only; node database and PKI keys are not included

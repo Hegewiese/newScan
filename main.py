@@ -46,7 +46,7 @@ log.setLevel(logging.DEBUG)  # our own logger always writes in full detail
 # Fixed log-tail footer
 # ---------------------------------------------------------------------------
 _LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "newscan.log")
-_TAIL_LINES = 5
+_TAIL_LINES = 8
 _FOOTER_ROWS = _TAIL_LINES + 1          # separator row + 5 log lines
 _tail_cache: list = []
 _tail_lock = threading.Lock()
@@ -132,68 +132,201 @@ def clear_screen() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Received message logging
 # ---------------------------------------------------------------------------
-_rx_callback = None
+# Received packet logging — all types
+# ---------------------------------------------------------------------------
+_rx_subs: list = []   # list of (callback, topic) registered by start_message_log
+
+BROADCAST = 0xFFFFFFFF
+
+
+def _rx_resolve(interface, num):
+    """Resolve a node number (int) to its best display name."""
+    if num is None:
+        return "?"
+    # nodesByNum is keyed by int — preferred; nodes is keyed by "!hex" string
+    node = (
+        (getattr(interface, "nodesByNum", None) or {}).get(num)
+        or (getattr(interface, "nodes",      None) or {}).get(num)
+        or (getattr(interface, "nodes",      None) or {}).get(f"!{num:08x}" if isinstance(num, int) else num)
+        or {}
+    )
+    u = node.get("user", {})
+    return (
+        u.get("longName")
+        or u.get("shortName")
+        or (f"!{num:08x}" if isinstance(num, int) else str(num))
+    )
+
+
+def _rx_relay(interface, packet) -> str:
+    """Return 'via <name>' for the last relay hop, or '' if direct / unknown."""
+    relay_byte = packet.get("relayNode")
+    if not relay_byte:
+        return ""
+    try:
+        for num, node in (interface.nodes or {}).items():
+            if isinstance(num, int) and (num & 0xFF) == relay_byte:
+                u = node.get("user", {})
+                name = u.get("longName") or u.get("shortName") or f"!{num:08x}"
+                return f"via {name}"
+    except Exception:
+        pass
+    return f"via !..{relay_byte:02x}"
+
+
+def _rx_sig(packet) -> str:
+    """Return '[snr=x, rssi=y]' signal suffix when available."""
+    parts = []
+    snr  = packet.get("rxSnr")
+    rssi = packet.get("rxRssi")
+    if snr  is not None: parts.append(f"snr={snr}dB")
+    if rssi is not None: parts.append(f"rssi={rssi}dBm")
+    return f"  [{', '.join(parts)}]" if parts else ""
 
 
 def start_message_log(iface) -> None:
-    """Subscribe to incoming text messages and write each one to the log."""
+    """Subscribe to all incoming packet types and write each to the log."""
     from pubsub import pub
+    global _rx_subs
 
-    global _rx_callback
-
+    # ── text messages ──────────────────────────────────────────────────────
     def _on_text(packet, interface):
         try:
+            nodes      = interface.nodes or {}
             sender_num = packet.get("from")
             to_num     = packet.get("to", 0)
-            channel    = packet.get("channel", 0)
-            nodes = interface.nodes or {}
-
-            def _resolve(num):
-                node = nodes.get(num) or {}
-                u = node.get("user", {})
-                return (
-                    u.get("longName")
-                    or u.get("shortName")
-                    or (f"!{num:08x}" if isinstance(num, int) else str(num))
-                )
-
-            sender_name = _resolve(sender_num)
-            BROADCAST   = 0xFFFFFFFF
-            dest        = "broadcast" if to_num == BROADCAST else _resolve(to_num)
-
-            text    = packet.get("decoded", {}).get("text", "")
-            rx_snr  = packet.get("rxSnr")
-            rx_rssi = packet.get("rxRssi")
-            hops    = packet.get("hopStart", 0) - packet.get("hopLimit", 0)
-
-            extras = []
-            if rx_snr  is not None: extras.append(f"snr={rx_snr}dB")
-            if rx_rssi is not None: extras.append(f"rssi={rx_rssi}dBm")
-            if hops    >  0:        extras.append(f"hops={hops}")
-            suffix = f"  [{', '.join(extras)}]" if extras else ""
-
-            ch_label = _ch_label(interface, channel)
-
-            icon = "\033[31m✉\033[0m" if to_num != BROADCAST else "✉"
-            log.info(f"{icon} {ch_label}  {sender_name} -> {dest}: {text!r}{suffix}")
+            sender     = _rx_resolve(interface,sender_num)
+            dest       = "broadcast" if to_num == BROADCAST else _rx_resolve(interface,to_num)
+            relay      = _rx_relay(interface, packet)
+            via        = f"  {relay}" if relay else ""
+            ch         = _ch_label(interface, packet.get("channel", 0))
+            text       = packet.get("decoded", {}).get("text", "")
+            icon       = "\033[31m✉\033[0m" if to_num != BROADCAST else "✉"
+            log.info(f"{icon} {ch}  {sender}{via} -> {dest}: {text!r}{_rx_sig(packet)}")
         except Exception as e:
-            log.warning(f"RX log error: {e}")
+            log.warning(f"RX text log error: {e}")
 
-    _rx_callback = _on_text
-    pub.subscribe(_rx_callback, "meshtastic.receive.text")
+    # ── position ───────────────────────────────────────────────────────────
+    def _on_position(packet, interface):
+        try:
+            nodes  = interface.nodes or {}
+            sender = _rx_resolve(interface,packet.get("from"))
+            relay  = _rx_relay(interface, packet)
+            via    = f"  {relay}" if relay else ""
+            ch     = _ch_label(interface, packet.get("channel", 0))
+            pos    = packet.get("decoded", {}).get("position", {})
+            parts  = []
+            if "latitudeI"  in pos: parts.append(f"lat={pos['latitudeI']/1e7:.5f}")
+            if "longitudeI" in pos: parts.append(f"lon={pos['longitudeI']/1e7:.5f}")
+            if pos.get("altitude"):  parts.append(f"alt={pos['altitude']}m")
+            if pos.get("satsInView"):parts.append(f"sats={pos['satsInView']}")
+            detail = "  ".join(parts) if parts else "no fix"
+            log.info(f"⊕ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}")
+        except Exception as e:
+            log.warning(f"RX position log error: {e}")
+
+    # ── node info ──────────────────────────────────────────────────────────
+    def _on_user(packet, interface):
+        try:
+            nodes  = interface.nodes or {}
+            sender = _rx_resolve(interface,packet.get("from"))
+            relay  = _rx_relay(interface, packet)
+            via    = f"  {relay}" if relay else ""
+            ch     = _ch_label(interface, packet.get("channel", 0))
+            u      = packet.get("decoded", {}).get("user", {})
+            detail = (f"long={u.get('longName')}  short={u.get('shortName')}  "
+                      f"hw={u.get('hwModel')}  role={u.get('role')}")
+            log.info(f"◉ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}")
+        except Exception as e:
+            log.warning(f"RX nodeinfo log error: {e}")
+
+    # ── telemetry ──────────────────────────────────────────────────────────
+    def _on_telemetry(packet, interface):
+        try:
+            nodes  = interface.nodes or {}
+            sender = _rx_resolve(interface,packet.get("from"))
+            relay  = _rx_relay(interface, packet)
+            via    = f"  {relay}" if relay else ""
+            ch     = _ch_label(interface, packet.get("channel", 0))
+            t      = packet.get("decoded", {}).get("telemetry", {})
+            dm     = t.get("deviceMetrics", {})
+            em     = t.get("environmentMetrics", {})
+            parts  = []
+            if dm:
+                if dm.get("batteryLevel")       is not None: parts.append(f"bat={dm['batteryLevel']}%")
+                if dm.get("voltage")            is not None: parts.append(f"volt={dm['voltage']:.2f}V")
+                if dm.get("channelUtilization") is not None: parts.append(f"chUtil={dm['channelUtilization']:.1f}%")
+                if dm.get("airUtilTx")          is not None: parts.append(f"airTx={dm['airUtilTx']:.1f}%")
+                if dm.get("uptimeSeconds")      is not None: parts.append(f"up={dm['uptimeSeconds']}s")
+            if em:
+                if em.get("temperature")        is not None: parts.append(f"temp={em['temperature']:.1f}°C")
+                if em.get("relativeHumidity")   is not None: parts.append(f"hum={em['relativeHumidity']:.1f}%")
+                if em.get("barometricPressure") is not None: parts.append(f"pres={em['barometricPressure']:.1f}hPa")
+            icon   = "⊡" if dm else "⊛"
+            detail = "  ".join(parts) if parts else "—"
+            log.info(f"{icon} {ch}  {sender}{via}: {detail}{_rx_sig(packet)}")
+        except Exception as e:
+            log.warning(f"RX telemetry log error: {e}")
+
+    # ── neighbor info ──────────────────────────────────────────────────────
+    def _on_neighborinfo(packet, interface):
+        try:
+            nodes     = interface.nodes or {}
+            sender    = _rx_resolve(interface,packet.get("from"))
+            relay     = _rx_relay(interface, packet)
+            via       = f"  {relay}" if relay else ""
+            ch        = _ch_label(interface, packet.get("channel", 0))
+            ni        = packet.get("decoded", {}).get("neighborinfo", {})
+            neighbors = ni.get("neighbors", [])
+            nb_names  = [_rx_resolve(interface,nb.get("nodeId")) for nb in neighbors[:6]]
+            detail    = f"{len(neighbors)} neighbors: {', '.join(nb_names)}" if nb_names else "0 neighbors"
+            log.info(f"⬡ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}")
+        except Exception as e:
+            log.warning(f"RX neighborinfo log error: {e}")
+
+    # ── traceroute received from others ────────────────────────────────────
+    def _on_traceroute_rx(packet, interface):
+        try:
+            my_num = interface.myInfo.my_node_num
+            if packet.get("to") == my_num and packet.get("from") != my_num:
+                return   # this is a response to our own tracer — already logged
+            nodes  = interface.nodes or {}
+            sender = _rx_resolve(interface,packet.get("from"))
+            dest   = _rx_resolve(interface,packet.get("to"))
+            relay  = _rx_relay(interface, packet)
+            via    = f"  {relay}" if relay else ""
+            ch     = _ch_label(interface, packet.get("channel", 0))
+            log.info(f"⇌ {ch}  {sender}{via} -> {dest}{_rx_sig(packet)}")
+        except Exception as e:
+            log.warning(f"RX traceroute log error: {e}")
+
+    subs = [
+        (_on_text,          "meshtastic.receive.text"),
+        (_on_position,      "meshtastic.receive.position"),
+        (_on_user,          "meshtastic.receive.user"),
+        (_on_telemetry,     "meshtastic.receive.telemetry"),
+        (_on_neighborinfo,  "meshtastic.receive.neighborinfo"),
+        (_on_traceroute_rx, "meshtastic.receive.traceroute"),
+    ]
+    for cb, topic in subs:
+        pub.subscribe(cb, topic)
+    _rx_subs = subs
 
 
 def stop_message_log() -> None:
-    global _rx_callback
-    if _rx_callback is not None:
+    global _rx_subs
+    if _rx_subs:
         try:
             from pubsub import pub
-            pub.unsubscribe(_rx_callback, "meshtastic.receive.text")
+            for cb, topic in _rx_subs:
+                try:
+                    pub.unsubscribe(cb, topic)
+                except Exception:
+                    pass
         except Exception:
             pass
-        _rx_callback = None
+        _rx_subs = []
 
 # ---------------------------------------------------------------------------
 
@@ -448,6 +581,8 @@ def _ch_label(iface, channel_index: int) -> str:
         name = ch_obj.settings.name.strip() if ch_obj and ch_obj.settings.name.strip() else None
     except Exception:
         name = None
+    if not name and channel_index == 0:
+        name = "Short Slow"
     return f"CH{channel_index} {name}" if name else f"CH{channel_index}"
 
 
@@ -489,7 +624,7 @@ def send_message(iface, node_id, name):
 
     try:
         iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
-        log.info(f"Message sent to {name} ({node_id}): {text!r}  {_ch_label(iface, 0)}  \033[31m✉\033[0m")
+        log.info(f"{_ch_label(iface, 0)}  Message sent to {name} ({node_id}): {text!r}  \033[31m✉\033[0m")
         print("  Sent. (Waiting for ACK...)")
     except Exception as e:
         log.exception(f"send_message to {name} ({node_id}) failed: {e}")
@@ -528,7 +663,7 @@ def send_repeated(iface, node_id, name):
 
             try:
                 iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
-                log.info(f"Repeated message #{current} sent to {name} ({node_id})  {_ch_label(iface, 0)}  \033[31m✉\033[0m")
+                log.info(f"{_ch_label(iface, 0)}  Repeated message #{current} sent to {name} ({node_id})  \033[31m✉\033[0m")
                 print(f"\r  Sent #{current} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
                 log.exception(f"Repeated message #{current} to {name} ({node_id}) failed: {e}")
@@ -756,7 +891,7 @@ def show_node_info(iface):
             hops_str = "direct" if hops == 0 else f"{hops} hops" if hops is not None else "N/A"
             print(f"  [{i}] {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
         c = 22
-        print(f"\n  {'d<n> Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}Enter to quit"
+        print(f"\n  {'d<n> Node Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}Enter to quit"
               f"\n  {''.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}e Export config")
 
     print_main()
