@@ -4,6 +4,7 @@ Meshtastic BLE scanner — discover devices and connect to one.
 Copyright by me
 """
 
+import logging
 import os
 import subprocess
 import sys
@@ -30,6 +31,15 @@ except ImportError:
     print("Error: meshtastic not installed. Run: pip install meshtastic bleak")
     sys.exit(1)
 
+logging.basicConfig(
+    filename=os.path.join(os.path.dirname(os.path.abspath(__file__)), "newscan.log"),
+    level=logging.WARNING,  # suppress third-party library noise (bleak, meshtastic, dbus, …)
+    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+log = logging.getLogger("newscan")
+log.setLevel(logging.DEBUG)  # our own logger always writes in full detail
+
 
 def _check_bt_linux():
     try:
@@ -37,6 +47,7 @@ def _check_bt_linux():
             ["bluetoothctl", "show"], capture_output=True, text=True, timeout=3
         )
     except FileNotFoundError:
+        log.warning("Bluetooth preflight: bluetoothctl not found")
         print(
             "  [WARN] Bluetooth: bluetoothctl not found\n"
             "                    sudo apt install bluez\n"
@@ -44,10 +55,12 @@ def _check_bt_linux():
         )
         return
     except subprocess.TimeoutExpired:
+        log.warning("Bluetooth preflight: bluetoothctl timed out")
         print("  [WARN] Bluetooth: bluetoothctl timed out — status unknown")
         return
 
     if not out.stdout.strip():
+        log.warning("Bluetooth preflight: no adapter found")
         print(
             "  [WARN] Bluetooth: no adapter found\n"
             "                    sudo systemctl start bluetooth"
@@ -55,12 +68,15 @@ def _check_bt_linux():
         return
 
     if "Powered: yes" in out.stdout:
+        log.info("Bluetooth preflight: adapter powered on")
         print("  [ OK ] Bluetooth: adapter powered on")
     else:
+        log.warning("Bluetooth preflight: adapter not powered on")
         print("  [WARN] Bluetooth: adapter found but not powered on")
         ans = input("          Power on Bluetooth now? [Y/n]: ").strip().lower()
         if ans != "n":
             subprocess.run(["bluetoothctl", "power", "on"], capture_output=True, timeout=3)
+            log.info("Bluetooth preflight: powered on by user request")
             print("          Bluetooth powered on.")
 
 
@@ -71,42 +87,55 @@ def _check_bt_macos():
             capture_output=True, text=True, timeout=5,
         )
         if "Bluetooth Power: On" in out.stdout or "State: On" in out.stdout:
+            log.info("Bluetooth preflight: on (macOS)")
             print("  [ OK ] Bluetooth: on")
         else:
+            log.warning("Bluetooth preflight: may be off (macOS)")
             print(
                 "  [WARN] Bluetooth: may be off\n"
                 "                    System Settings → Bluetooth → turn on"
             )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        log.warning("Bluetooth preflight: could not determine status (macOS)")
         print("  [ ?? ] Bluetooth: could not determine status (bleak will report errors)")
 
 
 def preflight_check():
     """Verify platform, Python version, venv, and Bluetooth before starting."""
+    log.info("=== newscan starting ===")
     print("Checking requirements...")
 
     # ── Platform ──────────────────────────────────────────────────────────────
     if sys.platform == "win32":
+        log.error("Preflight failed: Windows platform")
         print("  [FAIL] Platform : Windows is not supported. Use Linux or macOS.")
         sys.exit(1)
     elif sys.platform == "linux":
+        log.info("Preflight: platform=Linux")
         print("  [ OK ] Platform : Linux")
     elif sys.platform == "darwin":
+        log.info("Preflight: platform=macOS")
         print("  [ OK ] Platform : macOS")
     else:
+        log.warning(f"Preflight: untested platform={sys.platform}")
         print(f"  [WARN] Platform : {sys.platform} (untested — proceed with caution)")
 
     # ── Python version ────────────────────────────────────────────────────────
     ver = sys.version_info
     if ver < (3, 10):
+        log.error(f"Preflight failed: Python {ver.major}.{ver.minor} < 3.10")
         print(f"  [FAIL] Python   : {ver.major}.{ver.minor} — 3.10+ required.")
         sys.exit(1)
+    log.info(f"Preflight: Python {ver.major}.{ver.minor}.{ver.micro}")
     print(f"  [ OK ] Python   : {ver.major}.{ver.minor}.{ver.micro}")
 
     # ── Virtual environment ───────────────────────────────────────────────────
     if sys.prefix != sys.base_prefix:
-        print(f"  [ OK ] Venv     : {os.path.basename(sys.prefix)}")
+        venv_name = os.path.basename(sys.prefix)
+        log.info(f"Preflight: venv={venv_name}")
+        print(f"  [ OK ] Venv     : {venv_name}")
     else:
+        log.warning("Preflight: not running in a virtual environment")
         print(
             "  [WARN] Venv     : not active, meshtastic_venv/ not found\n"
             "                    pip install meshtastic bleak  (or create a venv first)"
@@ -171,9 +200,14 @@ class _Device:
 
 def find_known_devices():
     """Return already-paired Meshtastic devices from the system without scanning."""
+    log.info("Searching for known paired Meshtastic devices")
     try:
         out = subprocess.run(["bluetoothctl", "devices"], capture_output=True, text=True, timeout=3)
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    except FileNotFoundError:
+        log.warning("find_known_devices: bluetoothctl not found")
+        return []
+    except subprocess.TimeoutExpired:
+        log.warning("find_known_devices: bluetoothctl timed out")
         return []
 
     devices = []
@@ -188,14 +222,19 @@ def find_known_devices():
                 capture_output=True, text=True, timeout=3,
             )
         except subprocess.TimeoutExpired:
+            log.warning(f"find_known_devices: bluetoothctl info timed out for {address}")
             continue
         if SERVICE_UUID.lower() in info.stdout.lower():
+            log.info(f"Found known device: {name} [{address}]")
             devices.append(_Device(name, address))
+
+    log.info(f"Known devices found: {len(devices)}")
     return devices
 
 
 def scan():
     """Return a list of nearby Meshtastic BLE devices, with a progress bar."""
+    log.info("Starting BLE scan")
     result = []
     done = threading.Event()
 
@@ -220,6 +259,9 @@ def scan():
     done.wait()
     print(f"\r  Scanning BLE... [{'#' * bar_width}] {SCAN_DURATION:.1f}s")
     print(f"Found {len(result)} device(s). Please choose device you want to connect to and use")
+    log.info(f"BLE scan complete: {len(result)} device(s) found")
+    for d in result:
+        log.info(f"  Scanned device: {getattr(d, 'name', '?')} [{getattr(d, 'address', '?')}]")
     return result
 
 
@@ -232,9 +274,12 @@ def pick_device(devices):
     while True:
         choice = input("\nSelect device (number) [1]: ").strip()
         if not choice:
+            log.info(f"User selected device (default): {devices[0].name} [{devices[0].address}]")
             return devices[0]
         if choice.isdigit() and 1 <= int(choice) <= len(devices):
-            return devices[int(choice) - 1]
+            chosen = devices[int(choice) - 1]
+            log.info(f"User selected device: {chosen.name} [{chosen.address}]")
+            return chosen
         print("Invalid choice, try again.")
 
 
@@ -260,12 +305,15 @@ def send_message(iface, node_id, name):
     print(f"\n  Sending message to {name}")
     text = input("  Message: ").strip()
     if not text:
+        log.info(f"send_message to {name} ({node_id}): cancelled (empty input)")
         print("  Cancelled.")
         return
     try:
         iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True)
+        log.info(f"Message sent to {name} ({node_id}): {text!r}")
         print("  Sent.")
     except Exception as e:
+        log.exception(f"send_message to {name} ({node_id}) failed: {e}")
         print(f"  Failed: {e}")
 
 
@@ -274,10 +322,12 @@ def send_repeated(iface, node_id, name):
     print(f"\n  Repeated message to {name}")
     text = input("  Message: ").strip()
     if not text:
+        log.info(f"send_repeated to {name} ({node_id}): cancelled (empty input)")
         print("  Cancelled.")
         return
     interval_str = input("  Interval in seconds [10]: ").strip()
     interval = int(interval_str) if interval_str.isdigit() else 10
+    log.info(f"Repeated message to {name} ({node_id}) started: interval={interval}s text={text!r}")
 
     stop = threading.Event()
 
@@ -287,8 +337,10 @@ def send_repeated(iface, node_id, name):
             try:
                 iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True)
                 count += 1
+                log.info(f"Repeated message #{count} sent to {name} ({node_id})")
                 print(f"\r  Sent #{count} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
+                log.exception(f"Repeated message #{count + 1} to {name} ({node_id}) failed: {e}")
                 print(f"\r  Send #{count + 1} failed: {e}")
             stop.wait(interval)
 
@@ -297,6 +349,7 @@ def send_repeated(iface, node_id, name):
     input()
     stop.set()
     t.join()
+    log.info(f"Repeated message to {name} ({node_id}) stopped")
     print(f"  Stopped.")
 
 
@@ -304,6 +357,10 @@ def show_node_info(iface):
     """Print info about the connected node and visible mesh peers."""
     my_num = iface.myInfo.my_node_num
     metadata = iface.metadata
+
+    log.info(f"Local node number: {my_num}")
+    if metadata:
+        log.info(f"Firmware: {metadata.firmware_version}  Hardware: {metadata.hw_model}")
 
     print("\n" + "=" * 50)
     print("LOCAL NODE")
@@ -316,8 +373,10 @@ def show_node_info(iface):
     nodes = iface.nodes or {}
     all_peers = [(k, v) for k, v in nodes.items() if k != my_num]
     favorites = [(k, v) for k, v in all_peers if v.get("isFavorite")]
+    log.info(f"Peers visible: {len(all_peers)}  favorites: {len(favorites)}")
 
     if not favorites:
+        log.info("No favorite nodes visible")
         print("\nNo favorite nodes visible yet.")
         return
 
@@ -363,6 +422,7 @@ def show_peer_detail(peer):
     """Show detailed info for a selected peer."""
     user = peer.get("user", {})
     name = _peer_name(peer)
+    log.info(f"Viewing details for peer: {name} (id={user.get('id', 'N/A')})")
 
     print("\n" + "=" * 50)
     print(f"NODE: {name}")
@@ -385,6 +445,36 @@ def show_peer_detail(peer):
         print(f"  Voltage    : {metrics['voltage']:.2f} V")
 
 
+def _ensure_disconnected(address):
+    """On Linux, drop an existing BLE connection before we try to connect ourselves.
+
+    A device that is still marked as Connected in the BlueZ stack will cause
+    meshtastic's _waitConnected() to time out after ~60 s.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        info = subprocess.run(
+            ["bluetoothctl", "info", address],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    if "Connected: yes" not in info.stdout:
+        return
+    log.info(f"Device {address} still connected — disconnecting before re-connecting")
+    print("  Device is still connected from a previous session — disconnecting first...")
+    try:
+        subprocess.run(
+            ["bluetoothctl", "disconnect", address],
+            capture_output=True, text=True, timeout=5,
+        )
+        time.sleep(1)  # give BlueZ a moment to settle
+        log.info(f"Disconnected {address}")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning(f"Could not disconnect {address}: {e}")
+
+
 def main():
     preflight_check()
     print("\033[2J\033[H", end="", flush=True)
@@ -404,11 +494,13 @@ def main():
         devices = scan()
 
     if not devices:
+        log.error("No Meshtastic devices found — aborting")
         print("No Meshtastic devices found.")
         print("Make sure Bluetooth is enabled and the device is powered on.")
         sys.exit(1)
 
     device = pick_device(devices)
+    _ensure_disconnected(device.address)
 
     # Spinner runs in background; BLE connection stays on main thread
     _spin_done = threading.Event()
@@ -426,26 +518,40 @@ def main():
     _spin_thread = threading.Thread(target=_spinner, daemon=True)
     _spin_thread.start()
 
+    log.info(f"Connecting to {device.name} [{device.address}]")
     try:
         iface = _FastBLEInterface(device.address)
     except BLEInterface.BLEError as e:
         _spin_done.set()
         _spin_thread.join()
+        log.error(f"Connection failed: {e}")
+        print(f"\n  Connection failed: {e}")
+        sys.exit(1)
+    except Exception as e:
+        _spin_done.set()
+        _spin_thread.join()
+        log.exception(f"Unexpected error during connection: {e}")
         print(f"\n  Connection failed: {e}")
         sys.exit(1)
     finally:
         _spin_done.set()
         _spin_thread.join()
 
+    log.info(f"Connected to {device.name} [{device.address}]")
     print(f"\r  Connected to {device.name or device.address}.{' ' * 20}")
 
     try:
         show_node_info(iface)
+    except Exception as e:
+        log.exception(f"Unexpected error in session: {e}")
+        raise
     finally:
+        log.info("Closing connection")
         print("\nClosing connection...")
         t = threading.Thread(target=iface.close, daemon=True)
         t.start()
         t.join(timeout=3)
+        log.info("=== newscan session ended ===")
         print("Node Disconnected. Bye!")
 
 
