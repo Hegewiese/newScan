@@ -20,6 +20,7 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - **Navigate freely** — after viewing details or sending a message, the favorite list is reprinted and you can pick another node or quit
 - **Activity log** — all major events and exceptions are written to `newscan.log` with full timestamps
 
+
 ---
 
 ## Prerequisites

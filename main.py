@@ -353,6 +353,56 @@ def send_repeated(iface, node_id, name):
     print(f"  Stopped.")
 
 
+def traceroute_node(iface, node_id, name):
+    """Send a single traceroute to the given node and print the result."""
+    print(f"\n  Traceroute to {name}")
+    hop_str = input("  Hop limit [3]: ").strip()
+    hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
+    log.info(f"Traceroute to {name} ({node_id}), hop_limit={hop_limit}")
+    try:
+        print()
+        iface.sendTraceRoute(node_id, hop_limit)
+        log.info(f"Traceroute to {name} ({node_id}) completed")
+    except Exception as e:
+        log.exception(f"Traceroute to {name} ({node_id}) failed: {e}")
+        print(f"  Failed: {e}")
+
+
+def traceroute_repeated(iface, node_id, name):
+    """Send a traceroute repeatedly at a configurable interval until Enter is pressed."""
+    print(f"\n  Repeated traceroute to {name}")
+    hop_str = input("  Hop limit [3]: ").strip()
+    hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
+    interval_str = input("  Interval in seconds [30]: ").strip()
+    interval = int(interval_str) if interval_str.isdigit() else 30
+    log.info(f"Repeated traceroute to {name} ({node_id}) started: hop_limit={hop_limit}, interval={interval}s")
+
+    stop = threading.Event()
+
+    def _trace_loop():
+        count = 0
+        while not stop.is_set():
+            count += 1
+            print(f"\n  --- Traceroute #{count} to {name} ---")
+            try:
+                iface.sendTraceRoute(node_id, hop_limit)
+                log.info(f"Repeated traceroute #{count} to {name} ({node_id}) completed")
+            except Exception as e:
+                log.exception(f"Repeated traceroute #{count} to {name} ({node_id}) failed: {e}")
+                print(f"  Failed: {e}")
+            if not stop.is_set():
+                print(f"  Next in {interval}s — press Enter to stop.")
+            stop.wait(interval)
+
+    t = threading.Thread(target=_trace_loop, daemon=True)
+    t.start()
+    input()
+    stop.set()
+    t.join()
+    log.info(f"Repeated traceroute to {name} ({node_id}) stopped")
+    print("  Stopped.")
+
+
 def show_node_info(iface):
     """Print info about the connected node and visible mesh peers."""
     my_num = iface.myInfo.my_node_num
@@ -391,7 +441,7 @@ def show_node_info(iface):
             hops = p.get("hopsAway")
             hops_str = "direct" if hops == 0 else f"{hops} hops" if hops is not None else "N/A"
             print(f"  [{i}] {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
-        print(f"\n  d<n> Details   m<n> Message   r<n> Repeat msg   Enter to quit")
+        print(f"\n  d<n> Details   m<n> Message   r<n> Repeat msg   t<n> Traceroute   rt<n> Repeat trace   Enter to quit")
 
     print_favorites()
 
@@ -399,7 +449,12 @@ def show_node_info(iface):
         choice = input("  > ").strip().lower()
         if not choice:
             return
-        action, num = (choice[0], choice[1:]) if choice[0] in ("d", "m", "r") else ("d", choice)
+        if choice[:2] == "rt":
+            action, num = "rt", choice[2:]
+        elif choice[0] in ("d", "m", "r", "t"):
+            action, num = choice[0], choice[1:]
+        else:
+            action, num = "d", choice
         if num.isdigit() and 1 <= int(num) <= len(favorites):
             node_id, peer = favorites[int(num) - 1]
             if action == "d":
@@ -414,8 +469,16 @@ def show_node_info(iface):
                 send_repeated(iface, node_id, _peer_name(peer))
                 print()
                 print_favorites()
+            elif action == "t":
+                traceroute_node(iface, node_id, _peer_name(peer))
+                print()
+                print_favorites()
+            elif action == "rt":
+                traceroute_repeated(iface, node_id, _peer_name(peer))
+                print()
+                print_favorites()
         else:
-            print("  Invalid — try d1, m2, r3, or Enter to quit.")
+            print("  Invalid — try d1, m2, r3, t4, rt4, or Enter to quit.")
 
 
 def show_peer_detail(peer):
