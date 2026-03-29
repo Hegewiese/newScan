@@ -4,10 +4,23 @@ Meshtastic BLE scanner — discover devices and connect to one.
 Copyright by me
 """
 
+import os
 import subprocess
 import sys
 import threading
 import time
+
+# Re-exec into meshtastic_venv before attempting any third-party imports.
+if sys.prefix == sys.base_prefix:
+    _venv_python = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "meshtastic_venv", "bin", "python"
+    )
+    if os.path.isfile(_venv_python):
+        print("Not running in a virtual environment.")
+        print("  Included venv found: meshtastic_venv/")
+        _ans = input("  Activate meshtastic_venv and restart? [Y/n]: ").strip().lower()
+        if _ans != "n":
+            os.execv(_venv_python, [_venv_python] + sys.argv)
 
 try:
     import meshtastic.ble_interface
@@ -16,6 +29,96 @@ try:
 except ImportError:
     print("Error: meshtastic not installed. Run: pip install meshtastic bleak")
     sys.exit(1)
+
+
+def _check_bt_linux():
+    try:
+        out = subprocess.run(
+            ["bluetoothctl", "show"], capture_output=True, text=True, timeout=3
+        )
+    except FileNotFoundError:
+        print(
+            "  [WARN] Bluetooth: bluetoothctl not found\n"
+            "                    sudo apt install bluez\n"
+            "                    sudo usermod -aG bluetooth $USER"
+        )
+        return
+    except subprocess.TimeoutExpired:
+        print("  [WARN] Bluetooth: bluetoothctl timed out — status unknown")
+        return
+
+    if not out.stdout.strip():
+        print(
+            "  [WARN] Bluetooth: no adapter found\n"
+            "                    sudo systemctl start bluetooth"
+        )
+        return
+
+    if "Powered: yes" in out.stdout:
+        print("  [ OK ] Bluetooth: adapter powered on")
+    else:
+        print("  [WARN] Bluetooth: adapter found but not powered on")
+        ans = input("          Power on Bluetooth now? [Y/n]: ").strip().lower()
+        if ans != "n":
+            subprocess.run(["bluetoothctl", "power", "on"], capture_output=True, timeout=3)
+            print("          Bluetooth powered on.")
+
+
+def _check_bt_macos():
+    try:
+        out = subprocess.run(
+            ["system_profiler", "SPBluetoothDataType"],
+            capture_output=True, text=True, timeout=5,
+        )
+        if "Bluetooth Power: On" in out.stdout or "State: On" in out.stdout:
+            print("  [ OK ] Bluetooth: on")
+        else:
+            print(
+                "  [WARN] Bluetooth: may be off\n"
+                "                    System Settings → Bluetooth → turn on"
+            )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        print("  [ ?? ] Bluetooth: could not determine status (bleak will report errors)")
+
+
+def preflight_check():
+    """Verify platform, Python version, venv, and Bluetooth before starting."""
+    print("Checking requirements...")
+
+    # ── Platform ──────────────────────────────────────────────────────────────
+    if sys.platform == "win32":
+        print("  [FAIL] Platform : Windows is not supported. Use Linux or macOS.")
+        sys.exit(1)
+    elif sys.platform == "linux":
+        print("  [ OK ] Platform : Linux")
+    elif sys.platform == "darwin":
+        print("  [ OK ] Platform : macOS")
+    else:
+        print(f"  [WARN] Platform : {sys.platform} (untested — proceed with caution)")
+
+    # ── Python version ────────────────────────────────────────────────────────
+    ver = sys.version_info
+    if ver < (3, 10):
+        print(f"  [FAIL] Python   : {ver.major}.{ver.minor} — 3.10+ required.")
+        sys.exit(1)
+    print(f"  [ OK ] Python   : {ver.major}.{ver.minor}.{ver.micro}")
+
+    # ── Virtual environment ───────────────────────────────────────────────────
+    if sys.prefix != sys.base_prefix:
+        print(f"  [ OK ] Venv     : {os.path.basename(sys.prefix)}")
+    else:
+        print(
+            "  [WARN] Venv     : not active, meshtastic_venv/ not found\n"
+            "                    pip install meshtastic bleak  (or create a venv first)"
+        )
+
+    # ── Bluetooth ─────────────────────────────────────────────────────────────
+    if sys.platform == "linux":
+        _check_bt_linux()
+    elif sys.platform == "darwin":
+        _check_bt_macos()
+
+    print()
 
 
 class _FastBLEInterface(BLEInterface):
@@ -160,7 +263,7 @@ def send_message(iface, node_id, name):
         print("  Cancelled.")
         return
     try:
-        iface.sendText(text, destinationId=node_id, wantAck=True)
+        iface.sendText(f"[{time.strftime('%H:%M')}] {text}", destinationId=node_id, wantAck=True)
         print("  Sent.")
     except Exception as e:
         print(f"  Failed: {e}")
@@ -182,7 +285,7 @@ def send_repeated(iface, node_id, name):
         count = 0
         while not stop.is_set():
             try:
-                iface.sendText(text, destinationId=node_id, wantAck=True)
+                iface.sendText(f"[{time.strftime('%H:%M')}] {text}", destinationId=node_id, wantAck=True)
                 count += 1
                 print(f"\r  Sent #{count} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
@@ -283,6 +386,7 @@ def show_peer_detail(peer):
 
 
 def main():
+    preflight_check()
     print("\033[2J\033[H", end="", flush=True)
     print("!! Disconnect your phones and nodes as we need to see/scan them..\n")
     devices = find_known_devices()
@@ -315,7 +419,7 @@ def main():
         elapsed = 0.0
         while not _spin_done.wait(0.1):
             elapsed += 0.1
-            print(f"\r  Connecting to {device.name or device.address}... "
+            print(f"\r  Connecting to {device.name or device.address}... (might take up to 40 sec) "
                   f"{frames[i % 4]}  {elapsed:.1f}s", end="", flush=True)
             i += 1
 
