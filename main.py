@@ -66,9 +66,13 @@ def _redraw_log_footer() -> None:
     label = " LOGs "
     buf += f"\033[{sep_row};1H\033[K" + "─" * 2 + label + "─" * max(0, cols - 2 - len(label))
     for i in range(_TAIL_LINES):
-        row = sep_row + 1 + i
+        row  = sep_row + 1 + i
         text = lines[i] if i < len(lines) else ""
-        buf += f"\033[{row};1H\033[K{text[:cols]}"
+        if "WARNING" in text or "ERROR" in text:
+            text = f"\033[31m{text[:cols]}\033[0m"
+        else:
+            text = text[:cols]
+        buf += f"\033[{row};1H\033[K{text}"
     buf += "\0338"                       # DECRC — restore cursor
     sys.stdout.write(buf)
     sys.stdout.flush()
@@ -704,7 +708,7 @@ PING_TIMEOUT       = 10  # seconds
 _UNK_SNR = -128  # meshtastic sentinel for unknown SNR
 
 
-def _log_tracer_details(packet: dict, name: str) -> None:
+def _log_tracer_details(packet: dict, name: str, iface=None) -> None:
     """Write every available field of a tracer response packet to the log."""
     from pubsub import pub  # noqa: F401 (already imported by meshtastic; just use it)
 
@@ -723,6 +727,8 @@ def _log_tracer_details(packet: dict, name: str) -> None:
     snr_back     = tr.get("snrBack",     [])
 
     def _n(num):
+        if iface is not None and isinstance(num, int):
+            return _rx_resolve(iface, num)
         return f"!{num:08x}" if isinstance(num, int) else str(num)
 
     def _snr(raw):
@@ -808,7 +814,7 @@ def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
         pass
 
     if captured[0] is not None:
-        _log_tracer_details(captured[0], name)
+        _log_tracer_details(captured[0], name, iface=iface)
 
     if result["ok"] is True:
         return True, None
@@ -921,17 +927,6 @@ def ping_favorites(iface, favorites):
                 time.sleep(tick)
             print()
 
-    print()
-    bar_width = 40
-    tick      = 0.1
-    steps     = int(PING_TIMEOUT / tick)
-    for i in range(steps + 1):
-        filled = int(bar_width * i / steps)
-        bar    = "#" * filled + "-" * (bar_width - filled)
-        print(f"\r  Waiting for responses... [{bar}] {i * tick:4.1f}s", end="", flush=True)
-        time.sleep(tick)
-    print()
-
     ok = sum(1 for v in responded.values() if v)
     log.info(f"⌁ Ping favorites done: {ok}/{len(favorites)} responded")
     return responded
@@ -954,11 +949,79 @@ def show_node_info(iface):
 
     header = f"{node_name}  |  !{my_num:08x}  |  fw {fw}  |  hw {hw}"
 
-    _GREEN  = "\033[32m"
-    _ORANGE = "\033[33m"
-    _RESET  = "\033[0m"
+    _GREEN    = "\033[32m"
+    _ORANGE   = "\033[33m"
+    _RESET    = "\033[0m"
+    _FLASH_BG = "\033[43m"   # yellow background for incoming-activity flash
     ping_results = {}  # {node_id: bool} — populated after 'pf' command
 
+    name_w = max((len(_peer_name(p)) for _, p in favorites), default=0)
+
+    # ── incoming-activity flash ───────────────────────────────────────────
+    fav_ids   = {nid for nid, _ in favorites}
+    recent_rx = {}          # {node_id: float timestamp}
+    _rx_lock  = threading.Lock()
+
+    # node rows: after print_main() header(3) + blank(1) + count(1) + blank(1) = 6
+    # so node i (1-indexed) sits on terminal row 6+i
+    _NODE_ROW0 = 6
+    _flash_stop  = threading.Event()
+    _flash_phase = [False]
+
+    def _flash_worker():
+        while not _flash_stop.wait(0.5):
+            now = time.time()
+            with _rx_lock:
+                active = {nid for nid, ts in recent_rx.items() if now - ts < 6}
+            if not active:
+                continue
+            _flash_phase[0] = not _flash_phase[0]
+            buf = "\0337"   # DECSC — save cursor
+            for i, (node_id, p) in enumerate(favorites, 1):
+                if node_id not in active:
+                    continue
+                row  = _NODE_ROW0 + i
+                name = _peer_name(p).ljust(name_w)
+                last = _ago(p.get("lastHeard"))
+                snr  = p.get("snr", "N/A")
+                hops = p.get("hopsAway")
+                hops_str = "direct" if hops == 0 else f"{hops} hops" if hops is not None else "N/A"
+                if node_id in ping_results:
+                    dot  = f"{_GREEN}●{_RESET}" if ping_results[node_id] else f"{_ORANGE}●{_RESET}"
+                    line = f"  [{i}] {dot} {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}"
+                else:
+                    line = f"  [{i}]   {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}"
+                if _flash_phase[0]:
+                    line = f"{_FLASH_BG}{line}{_RESET}"
+                buf += f"\033[{row};1H\033[K{line}"
+            buf += "\0338"  # DECRC — restore cursor
+            sys.stdout.write(buf)
+            sys.stdout.flush()
+
+    _flash_thread = threading.Thread(target=_flash_worker, daemon=True)
+    _flash_thread.start()
+
+    # subscribe to all receive topics to detect activity from favorites
+    from pubsub import pub as _pub
+
+    def _note_rx(packet, interface):
+        sender = packet.get("from")
+        if sender in fav_ids:
+            with _rx_lock:
+                recent_rx[sender] = time.time()
+
+    _rx_topics = [
+        "meshtastic.receive.text",
+        "meshtastic.receive.position",
+        "meshtastic.receive.user",
+        "meshtastic.receive.telemetry",
+        "meshtastic.receive.neighborinfo",
+        "meshtastic.receive.traceroute",
+    ]
+    for _t in _rx_topics:
+        _pub.subscribe(_note_rx, _t)
+
+    # ── main display / command loop ───────────────────────────────────────
     def print_main():
         clear_screen()
         print("=" * len(header))
@@ -967,8 +1030,6 @@ def show_node_info(iface):
         if not favorites:
             print("\nNo favorite nodes visible yet.")
             return
-        names = [_peer_name(p) for _, p in favorites]
-        name_w = max(len(n) for n in names)
         print(f"\nFavorite peers: {len(favorites)} of {len(all_peers)} visible\n")
         for i, (node_id, p) in enumerate(favorites, 1):
             name = _peer_name(p).ljust(name_w)
@@ -988,58 +1049,68 @@ def show_node_info(iface):
     print_main()
 
     if not favorites:
+        _flash_stop.set()
         return
 
-    while True:
-        choice = input("  > ").strip().lower()
-        if not choice:
-            confirm = input("  Really quit? [y/N]: ").strip().lower()
-            if confirm == "y":
-                return
-            print_main()
-            continue
-        if choice == "e":
-            clear_screen()
-            export_node_config(iface)
-            print_main()
-            continue
-        if choice == "pf":
-            clear_screen()
-            results = ping_favorites(iface, favorites)
-            ping_results.update(results)
-            print_main()
-            continue
-        if choice[:2] == "rt":
-            action, num = "rt", choice[2:]
-        elif choice[0] in ("d", "m", "r", "t"):
-            action, num = choice[0], choice[1:]
-        else:
-            action, num = "d", choice
-        if num.isdigit() and 1 <= int(num) <= len(favorites):
-            node_id, peer = favorites[int(num) - 1]
-            if action == "d":
-                clear_screen()
-                show_peer_detail(peer)
-                input("\n  Press Enter to continue...")
+    try:
+        while True:
+            choice = input("  > ").strip().lower()
+            if not choice:
+                confirm = input("  Really quit? [y/N]: ").strip().lower()
+                if confirm == "y":
+                    return
                 print_main()
-            elif action == "m":
+                continue
+            if choice == "e":
                 clear_screen()
-                send_message(iface, node_id, _peer_name(peer))
+                export_node_config(iface)
                 print_main()
-            elif action == "r":
+                continue
+            if choice == "pf":
                 clear_screen()
-                send_repeated(iface, node_id, _peer_name(peer))
+                results = ping_favorites(iface, favorites)
+                ping_results.update(results)
                 print_main()
-            elif action == "t":
-                clear_screen()
-                tracer_node(iface, node_id, _peer_name(peer))
-                print_main()
-            elif action == "rt":
-                clear_screen()
-                tracer_repeated(iface, node_id, _peer_name(peer))
-                print_main()
-        else:
-            print("  Invalid — try d1, m2, r3, t4, rt4, or Enter to quit.")
+                continue
+            if choice[:2] == "rt":
+                action, num = "rt", choice[2:]
+            elif choice[0] in ("d", "m", "r", "t"):
+                action, num = choice[0], choice[1:]
+            else:
+                action, num = "d", choice
+            if num.isdigit() and 1 <= int(num) <= len(favorites):
+                node_id, peer = favorites[int(num) - 1]
+                if action == "d":
+                    clear_screen()
+                    show_peer_detail(peer)
+                    input("\n  Press Enter to continue...")
+                    print_main()
+                elif action == "m":
+                    clear_screen()
+                    send_message(iface, node_id, _peer_name(peer))
+                    print_main()
+                elif action == "r":
+                    clear_screen()
+                    send_repeated(iface, node_id, _peer_name(peer))
+                    print_main()
+                elif action == "t":
+                    clear_screen()
+                    tracer_node(iface, node_id, _peer_name(peer))
+                    print_main()
+                elif action == "rt":
+                    clear_screen()
+                    tracer_repeated(iface, node_id, _peer_name(peer))
+                    print_main()
+            else:
+                print("  Invalid — try d1, m2, r3, t4, rt4, or Enter to quit.")
+    finally:
+        _flash_stop.set()
+        _flash_thread.join(timeout=1)
+        for _t in _rx_topics:
+            try:
+                _pub.unsubscribe(_note_rx, _t)
+            except Exception:
+                pass
 
 
 def show_peer_detail(peer):
