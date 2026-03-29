@@ -959,7 +959,7 @@ def show_node_info(iface):
 
     # ── incoming-activity flash ───────────────────────────────────────────
     fav_ids   = {nid for nid, _ in favorites}
-    recent_rx = {}          # {node_id: float timestamp}
+    recent_rx = {}          # {node_id: float timestamp} i thought
     _rx_lock  = threading.Lock()
 
     # node rows: after print_main() header(3) + blank(1) + count(1) + blank(1) = 6
