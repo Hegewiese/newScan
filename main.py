@@ -4,6 +4,7 @@ Meshtastic BLE scanner — discover devices and connect to one.
 Copyright by me
 """
 
+import json
 import logging
 import os
 import subprocess
@@ -494,7 +495,7 @@ def show_node_info(iface):
             hops = p.get("hopsAway")
             hops_str = "direct" if hops == 0 else f"{hops} hops" if hops is not None else "N/A"
             print(f"  [{i}] {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
-        print(f"\n  d<n> Details   m<n> Message   r<n> Repeat msg   t<n> Traceroute   rt<n> Repeat trace   Enter to quit")
+        print(f"\n  d<n> Details   m<n> Message   r<n> Repeat msg   t<n> Traceroute   rt<n> Repeat trace   e Export config   Enter to quit")
 
     print_favorites()
 
@@ -502,6 +503,11 @@ def show_node_info(iface):
         choice = input("  > ").strip().lower()
         if not choice:
             return
+        if choice == "e":
+            export_node_config(iface)
+            print()
+            print_favorites()
+            continue
         if choice[:2] == "rt":
             action, num = "rt", choice[2:]
         elif choice[0] in ("d", "m", "r", "t"):
@@ -559,6 +565,42 @@ def show_peer_detail(peer):
         print(f"  Battery    : {metrics['batteryLevel']}%")
     if metrics.get("voltage") is not None:
         print(f"  Voltage    : {metrics['voltage']:.2f} V")
+
+
+def export_node_config(iface):
+    """Export the connected node's config (localConfig, moduleConfig, channels) to a JSON file."""
+    from google.protobuf.json_format import MessageToDict
+
+    node = iface.localNode
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    try:
+        node_name = (iface.getLongName() or "unknown").replace(" ", "_")
+    except Exception:
+        node_name = "unknown"
+    filename = f"{node_name}_{timestamp}_config.json"
+    filepath = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+
+    config = {}
+    try:
+        if node.localConfig:
+            config["localConfig"] = MessageToDict(node.localConfig)
+        if node.moduleConfig:
+            config["moduleConfig"] = MessageToDict(node.moduleConfig)
+        if node.channels:
+            config["channels"] = [MessageToDict(ch) for ch in node.channels]
+    except Exception as e:
+        log.exception(f"export_node_config: failed to serialize config: {e}")
+        print(f"  [WARN] Config export failed (serialization): {e}")
+        return
+
+    try:
+        with open(filepath, "w") as f:
+            json.dump(config, f, indent=2)
+        log.info(f"Node config exported to {filepath}")
+        print(f"  Config exported: {filename}")
+    except OSError as e:
+        log.error(f"export_node_config: failed to write {filepath}: {e}")
+        print(f"  [WARN] Config export failed (write): {e}")
 
 
 def _ensure_disconnected(address):

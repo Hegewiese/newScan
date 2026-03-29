@@ -1,2 +1,4 @@
 meshtastic_venv/
 newscan.log
+*.json
+*.pyc
