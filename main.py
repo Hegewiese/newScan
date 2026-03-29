@@ -353,19 +353,65 @@ def send_repeated(iface, node_id, name):
     print(f"  Stopped.")
 
 
+TRACEROUTE_TIMEOUT = 30  # seconds
+
+
+def _traceroute_with_bar(iface, node_id, hop_limit):
+    """Run sendTraceRoute in a thread and show a progress bar while waiting.
+
+    The library prints the route result itself when the response arrives.
+    Returns (success: bool, error: str|None).
+    """
+    result = {"ok": None, "error": None}
+    done = threading.Event()
+
+    def _run():
+        try:
+            iface.sendTraceRoute(node_id, hop_limit)
+            result["ok"] = True
+        except Exception as e:
+            result["ok"] = False
+            result["error"] = str(e)
+        done.set()
+
+    threading.Thread(target=_run, daemon=True).start()
+
+    bar_width = 40
+    tick = 0.1
+    steps = int(TRACEROUTE_TIMEOUT / tick)
+    for i in range(steps + 1):
+        filled = int(bar_width * i / steps)
+        bar = "#" * filled + "-" * (bar_width - filled)
+        print(f"\r  Waiting for route... [{bar}] {i * tick:4.1f}s", end="", flush=True)
+        if done.is_set():
+            break
+        time.sleep(tick)
+
+    print()  # end the progress bar line
+    done.wait(timeout=1)  # brief grace period for the thread to finish
+
+    if result["ok"] is True:
+        return True, None
+    elif result["ok"] is False:
+        return False, result["error"]
+    else:
+        return False, f"timed out after {TRACEROUTE_TIMEOUT}s"
+
+
 def traceroute_node(iface, node_id, name):
     """Send a single traceroute to the given node and print the result."""
     print(f"\n  Traceroute to {name}")
     hop_str = input("  Hop limit [3]: ").strip()
     hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
     log.info(f"Traceroute to {name} ({node_id}), hop_limit={hop_limit}")
-    try:
-        print()
-        iface.sendTraceRoute(node_id, hop_limit)
-        log.info(f"Traceroute to {name} ({node_id}) completed")
-    except Exception as e:
-        log.exception(f"Traceroute to {name} ({node_id}) failed: {e}")
-        print(f"  Failed: {e}")
+    print()
+    success, err = _traceroute_with_bar(iface, node_id, hop_limit)
+    if success:
+        log.info(f"Traceroute to {name} ({node_id}) completed successfully")
+        print("  Success.")
+    else:
+        log.error(f"Traceroute to {name} ({node_id}) failed: {err}")
+        print(f"  Failed: {err}")
 
 
 def traceroute_repeated(iface, node_id, name):
@@ -378,18 +424,20 @@ def traceroute_repeated(iface, node_id, name):
     log.info(f"Repeated traceroute to {name} ({node_id}) started: hop_limit={hop_limit}, interval={interval}s")
 
     stop = threading.Event()
+    last_result = {"count": 0, "success": None}
 
     def _trace_loop():
-        count = 0
         while not stop.is_set():
-            count += 1
+            last_result["count"] += 1
+            count = last_result["count"]
             print(f"\n  --- Traceroute #{count} to {name} ---")
-            try:
-                iface.sendTraceRoute(node_id, hop_limit)
+            success, err = _traceroute_with_bar(iface, node_id, hop_limit)
+            last_result["success"] = success
+            if success:
                 log.info(f"Repeated traceroute #{count} to {name} ({node_id}) completed")
-            except Exception as e:
-                log.exception(f"Repeated traceroute #{count} to {name} ({node_id}) failed: {e}")
-                print(f"  Failed: {e}")
+            else:
+                log.error(f"Repeated traceroute #{count} to {name} ({node_id}) failed: {err}")
+                print(f"  Failed: {err}")
             if not stop.is_set():
                 print(f"  Next in {interval}s — press Enter to stop.")
             stop.wait(interval)
@@ -398,9 +446,14 @@ def traceroute_repeated(iface, node_id, name):
     t.start()
     input()
     stop.set()
-    t.join()
+    t.join(timeout=3)
     log.info(f"Repeated traceroute to {name} ({node_id}) stopped")
-    print("  Stopped.")
+    if last_result["success"] is True:
+        print(f"  Stopped. Last traceroute #{last_result['count']}: success.")
+    elif last_result["success"] is False:
+        print(f"  Stopped. Last traceroute #{last_result['count']}: failed.")
+    else:
+        print("  Stopped.")
 
 
 def show_node_info(iface):
