@@ -886,10 +886,11 @@ def ping_favorites(iface, favorites):
     responded = {node_id: False for node_id, _ in favorites}
     lock = threading.Lock()
 
-    print(f"\n  Pinging {len(favorites)} node(s)...\n")
-    log.info(f"⌁ Ping favorites started: {len(favorites)} node(s)")
+    total = len(favorites)
+    print(f"\n  Pinging {total} node(s)...\n")
+    log.info(f"⌁ Ping favorites started: {total} node(s)")
 
-    for node_id, peer in favorites:
+    for idx, (node_id, peer) in enumerate(favorites):
         name = _peer_name(peer)
 
         def _on_response(packet, _nid=node_id, _nm=name):
@@ -905,10 +906,22 @@ def ping_favorites(iface, favorites):
                 wantResponse=True,
                 onResponse=_on_response,
             )
+            print(f"  [{idx + 1}/{total}] NodeInfo request sent to {name}")
             log.info(f"⌁ ping (nodeinfo request) sent to {name} ({node_id})")
         except Exception as e:
+            print(f"  [{idx + 1}/{total}] Failed to reach {name}: {e}")
             log.warning(f"⌁ ping to {name} ({node_id}) failed to send: {e}")
 
+        if idx < total - 1:
+            tick = 0.1
+            steps = int(5 / tick)
+            for i in range(steps + 1):
+                remaining = 5 - i * tick
+                print(f"\r  Next node in {remaining:.1f}s...", end="", flush=True)
+                time.sleep(tick)
+            print()
+
+    print()
     bar_width = 40
     tick      = 0.1
     steps     = int(PING_TIMEOUT / tick)
