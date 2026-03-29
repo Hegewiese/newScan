@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """
 Meshtastic BLE scanner — discover devices and connect to one.
+Copyright by me
 """
 
 import subprocess
