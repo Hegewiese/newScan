@@ -60,7 +60,7 @@ def _redraw_log_footer() -> None:
     except Exception:
         return
     with _tail_lock:
-        lines = list(_tail_cache)
+        lines = list(reversed(_tail_cache))
     buf = "\0337"                        # DECSC — save cursor
     sep_row = rows - _FOOTER_ROWS + 1
     label = " LOGs "
@@ -129,6 +129,71 @@ def clear_screen() -> None:
     sys.stdout.write("\033[H\033[2J")
     sys.stdout.flush()
     _setup_scroll_region()
+
+
+# ---------------------------------------------------------------------------
+# Received message logging
+# ---------------------------------------------------------------------------
+_rx_callback = None
+
+
+def start_message_log(iface) -> None:
+    """Subscribe to incoming text messages and write each one to the log."""
+    from pubsub import pub
+
+    global _rx_callback
+
+    def _on_text(packet, interface):
+        try:
+            sender_num = packet.get("from")
+            to_num     = packet.get("to", 0)
+            channel    = packet.get("channel", 0)
+            nodes = interface.nodes or {}
+
+            def _resolve(num):
+                node = nodes.get(num) or {}
+                u = node.get("user", {})
+                return (
+                    u.get("longName")
+                    or u.get("shortName")
+                    or (f"!{num:08x}" if isinstance(num, int) else str(num))
+                )
+
+            sender_name = _resolve(sender_num)
+            BROADCAST   = 0xFFFFFFFF
+            dest        = "broadcast" if to_num == BROADCAST else _resolve(to_num)
+
+            text    = packet.get("decoded", {}).get("text", "")
+            rx_snr  = packet.get("rxSnr")
+            rx_rssi = packet.get("rxRssi")
+            hops    = packet.get("hopStart", 0) - packet.get("hopLimit", 0)
+
+            extras = []
+            if rx_snr  is not None: extras.append(f"snr={rx_snr}dB")
+            if rx_rssi is not None: extras.append(f"rssi={rx_rssi}dBm")
+            if hops    >  0:        extras.append(f"hops={hops}")
+            suffix = f"  [{', '.join(extras)}]" if extras else ""
+
+            ch_label = _ch_label(interface, channel)
+
+            icon = "\033[31m✉\033[0m" if to_num != BROADCAST else "✉"
+            log.info(f"{icon} {ch_label}  {sender_name} -> {dest}: {text!r}{suffix}")
+        except Exception as e:
+            log.warning(f"RX log error: {e}")
+
+    _rx_callback = _on_text
+    pub.subscribe(_rx_callback, "meshtastic.receive.text")
+
+
+def stop_message_log() -> None:
+    global _rx_callback
+    if _rx_callback is not None:
+        try:
+            from pubsub import pub
+            pub.unsubscribe(_rx_callback, "meshtastic.receive.text")
+        except Exception:
+            pass
+        _rx_callback = None
 
 # ---------------------------------------------------------------------------
 
@@ -375,6 +440,17 @@ def pick_device(devices):
         print("Invalid choice, try again.")
 
 
+def _ch_label(iface, channel_index: int) -> str:
+    """Return 'CH<n> <name>' if the channel has a name, else 'CH<n>'."""
+    try:
+        chs = iface.localNode.channels or []
+        ch_obj = next((c for c in chs if c.index == channel_index), None)
+        name = ch_obj.settings.name.strip() if ch_obj and ch_obj.settings.name.strip() else None
+    except Exception:
+        name = None
+    return f"CH{channel_index} {name}" if name else f"CH{channel_index}"
+
+
 def _ago(ts):
     """Format a Unix timestamp aas a human-readable 'X ago' string."""
     if not ts:
@@ -413,7 +489,7 @@ def send_message(iface, node_id, name):
 
     try:
         iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
-        log.info(f"Message sent to {name} ({node_id}): {text!r}")
+        log.info(f"Message sent to {name} ({node_id}): {text!r}  {_ch_label(iface, 0)}  \033[31m✉\033[0m")
         print("  Sent. (Waiting for ACK...)")
     except Exception as e:
         log.exception(f"send_message to {name} ({node_id}) failed: {e}")
@@ -452,7 +528,7 @@ def send_repeated(iface, node_id, name):
 
             try:
                 iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
-                log.info(f"Repeated message #{current} sent to {name} ({node_id})")
+                log.info(f"Repeated message #{current} sent to {name} ({node_id})  {_ch_label(iface, 0)}  \033[31m✉\033[0m")
                 print(f"\r  Sent #{current} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
                 log.exception(f"Repeated message #{current} to {name} ({node_id}) failed: {e}")
@@ -708,6 +784,7 @@ def show_node_info(iface):
             if action == "d":
                 clear_screen()
                 show_peer_detail(peer)
+                input("\n  Press Enter to continue...")
                 print_main()
             elif action == "m":
                 clear_screen()
@@ -730,30 +807,77 @@ def show_node_info(iface):
 
 
 def show_peer_detail(peer):
-    """Show detailed info for a selected peer."""
-    user = peer.get("user", {})
-    name = _peer_name(peer)
-    log.info(f"Viewing details for peer: {name} (id={user.get('id', 'N/A')})")
+    """Show detailed info for a selected peer and log all available fields."""
+    user    = peer.get("user", {})
+    name    = _peer_name(peer)
+    pos     = peer.get("position") or {}
+    metrics = peer.get("deviceMetrics") or {}
+    snr     = peer.get("snr")
+    hops    = peer.get("hopsAway")
+    rssi    = peer.get("rxRssi")
+    last    = peer.get("lastHeard")
 
+    # --- log everything available ----------------------------------------
+    log.info(f"Node detail: {name}")
+    log.info(f"  id={user.get('id','N/A')}  short={user.get('shortName','N/A')}  "
+             f"hw={user.get('hwModel','N/A')}  role={user.get('role','N/A')}")
+    log.info(f"  lastHeard={last}  snr={snr}dB  rssi={rssi}  hopsAway={hops}")
+    if pos:
+        lat  = pos.get("latitude")
+        lon  = pos.get("longitude")
+        alt  = pos.get("altitude")
+        sats = pos.get("satsInView")
+        ptime= pos.get("time")
+        log.info(f"  pos: lat={lat} lon={lon} alt={alt}m sats={sats} time={ptime}")
+    if metrics:
+        log.info(
+            f"  metrics: battery={metrics.get('batteryLevel')}%  "
+            f"voltage={metrics.get('voltage')}V  "
+            f"chUtil={metrics.get('channelUtilization')}%  "
+            f"airTx={metrics.get('airUtilTx')}%  "
+            f"uptime={metrics.get('uptimeSeconds')}s"
+        )
+    env = peer.get("environmentMetrics") or {}
+    if env:
+        log.info(
+            f"  env: temp={env.get('temperature')}°C  "
+            f"humidity={env.get('relativeHumidity')}%  "
+            f"pressure={env.get('barometricPressure')}hPa"
+        )
+
+    # --- screen display ---------------------------------------------------
+    hops_str = "direct" if hops == 0 else str(hops) if hops is not None else "N/A"
     print("\n" + "=" * 50)
     print(f"NODE: {name}")
     print("=" * 50)
     print(f"  ID         : {user.get('id', 'N/A')}")
     print(f"  Short name : {user.get('shortName', 'N/A')}")
-    print(f"  Last seen  : {_ago(peer.get('lastHeard'))}")
-    snr = peer.get("snr")
+    print(f"  Hardware   : {user.get('hwModel', 'N/A')}")
+    print(f"  Role       : {user.get('role', 'N/A')}")
+    print(f"  Last seen  : {_ago(last)}")
     if snr is not None:
-        print(f"  SNR        : {snr} dB")
-    hops = peer.get("hopsAway")
-    print(f"  Hops away  : {'direct' if hops == 0 else hops if hops is not None else 'N/A'}")
-    pos = peer.get("position") or {}
+        snr_time = time.strftime("%H:%M %d.%m.%Y", time.localtime(last)) if last else "unknown"
+        print(f"  SNR        : {snr} dB  (seen {snr_time})")
+    if rssi is not None:
+        print(f"  RSSI       : {rssi} dBm")
+    print(f"  Hops away  : {hops_str}")
     if pos.get("latitude"):
-        print(f"  Position   : {pos['latitude']:.5f}, {pos['longitude']:.5f}")
-    metrics = peer.get("deviceMetrics") or {}
+        print(f"  Position   : {pos['latitude']:.5f}, {pos['longitude']:.5f}", end="")
+        if pos.get("altitude"):
+            print(f"  alt {pos['altitude']} m", end="")
+        print()
     if metrics.get("batteryLevel") is not None:
         print(f"  Battery    : {metrics['batteryLevel']}%")
     if metrics.get("voltage") is not None:
         print(f"  Voltage    : {metrics['voltage']:.2f} V")
+    if metrics.get("channelUtilization") is not None:
+        print(f"  Ch util    : {metrics['channelUtilization']:.1f}%")
+    if metrics.get("airUtilTx") is not None:
+        print(f"  Air TX     : {metrics['airUtilTx']:.1f}%")
+    if env.get("temperature") is not None:
+        print(f"  Temp       : {env['temperature']:.1f} °C")
+    if env.get("relativeHumidity") is not None:
+        print(f"  Humidity   : {env['relativeHumidity']:.1f}%")
 
 
 def export_node_config(iface):
@@ -888,12 +1012,14 @@ def main():
     print(f"\r  Connected to {device.name or device.address}.{' ' * 20}")
 
     start_log_tail()
+    start_message_log(iface)
     try:
         show_node_info(iface)
     except Exception as e:
         log.exception(f"Unexpected error in session: {e}")
         raise
     finally:
+        stop_message_log()
         stop_log_tail()
         log.info("Closing connection")
         print("\nClosing connection...")
