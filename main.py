@@ -70,6 +70,8 @@ def _redraw_log_footer() -> None:
         text = lines[i] if i < len(lines) else ""
         if "WARNING" in text or "ERROR" in text:
             text = f"\033[31m{text[:cols]}\033[0m"
+        elif "tracer [" in text or "tracer to " in text or "Repeated tracer" in text:
+            text = f"\033[94m{text[:cols]}\033[0m"
         else:
             text = text[:cols]
         buf += f"\033[{row};1H\033[K{text}"
@@ -139,7 +141,9 @@ def clear_screen() -> None:
 # ---------------------------------------------------------------------------
 # Received packet logging — all types
 # ---------------------------------------------------------------------------
-_rx_subs: list = []   # list of (callback, topic) registered by start_message_log
+_rx_subs: list = []        # list of (callback, topic) registered by start_message_log
+_last_rx_time: float = 0.0  # epoch timestamp of last received packet — updated by start_message_log
+_RX_WATCHDOG_SECS = 300     # warn if no packet received for this long (5 minutes)
 
 BROADCAST = 0xFFFFFFFF
 
@@ -312,18 +316,18 @@ def start_message_log(iface) -> None:
     # ── traceroute received from others ────────────────────────────────────
     def _on_traceroute_rx(packet, interface):
         try:
-            my_num = interface.myInfo.my_node_num
-            if packet.get("to") == my_num and packet.get("from") != my_num:
-                return   # this is a response to our own tracer — already logged
-            nodes  = interface.nodes or {}
-            sender = _rx_resolve(interface,packet.get("from"))
-            dest   = _rx_resolve(interface,packet.get("to"))
+            sender = _rx_resolve(interface, packet.get("from"))
+            dest   = _rx_resolve(interface, packet.get("to"))
             relay  = _rx_relay(interface, packet)
             via    = f"  {relay}" if relay else ""
             ch     = _ch_label(interface, packet.get("channel", 0))
             log.info(f"⇌ {ch}  {sender}{via} -> {dest}{_rx_sig(packet)}")
         except Exception as e:
             log.warning(f"RX traceroute log error: {e}")
+
+    def _stamp_rx(packet, interface):
+        global _last_rx_time
+        _last_rx_time = time.time()
 
     subs = [
         (_on_text,          "meshtastic.receive.text"),
@@ -335,7 +339,8 @@ def start_message_log(iface) -> None:
     ]
     for cb, topic in subs:
         pub.subscribe(cb, topic)
-    _rx_subs = subs
+        pub.subscribe(_stamp_rx, topic)
+    _rx_subs = subs + [(_stamp_rx, t) for _, t in subs]
 
 
 def stop_message_log() -> None:
@@ -500,6 +505,10 @@ class _FastBLEInterface(BLEInterface):
             except Exception:
                 pass
             self.client = None
+        try:
+            self._disconnected()  # publish meshtastic.connection.lost
+        except Exception:
+            pass
 
 
 SCAN_DURATION = 10  # seconds — must match BLEInterface.scan() timeout
@@ -704,6 +713,8 @@ def send_repeated(iface, node_id, name):
 
 
 TRACEROUTE_TIMEOUT = 30  # seconds
+_LB  = "\033[94m"   # light blue — used for traceroute terminal output
+_RST = "\033[0m"
 PING_TIMEOUT       = 10  # seconds
 _UNK_SNR = -128  # meshtastic sentinel for unknown SNR
 
@@ -741,7 +752,9 @@ def _log_tracer_details(packet: dict, name: str, iface=None) -> None:
         parts.append(f"{_n(n)}({snr})")
     last_snr = _snr(snr_towards[-1]) if snr_towards else "?"
     parts.append(f"{_n(frm)}({last_snr})")
-    log.info(f"tracer [{name}] towards:  {' --> '.join(parts)}")
+    towards_line = f"tracer [{name}] towards:  {' --> '.join(parts)}"
+    log.info(towards_line)
+    print(f"\n{_LB}  {towards_line}{_RST}")
 
     # --- back route (only if present) -----------------------------------
     if route_back or snr_back:
@@ -751,7 +764,9 @@ def _log_tracer_details(packet: dict, name: str, iface=None) -> None:
             bp.append(f"{_n(n)}({snr})")
         last_snr_back = _snr(snr_back[-1]) if snr_back else "?"
         bp.append(f"{_n(to)}({last_snr_back})")
-        log.info(f"tracer [{name}] back:     {' --> '.join(bp)}")
+        back_line = f"tracer [{name}] back:     {' --> '.join(bp)}"
+        log.info(back_line)
+        print(f"{_LB}  {back_line}{_RST}")
 
     # --- packet-level metrics -------------------------------------------
     extras = [f"pktId={pkt_id}"]
@@ -759,7 +774,9 @@ def _log_tracer_details(packet: dict, name: str, iface=None) -> None:
     if rx_rssi is not None: extras.append(f"rxRSSI={rx_rssi}dBm")
     if hop_start is not None: extras.append(f"hopStart={hop_start}")
     if hop_limit is not None: extras.append(f"hopLimit={hop_limit}")
-    log.info(f"tracer [{name}] metrics:  {', '.join(extras)}")
+    metrics_line = f"tracer [{name}] metrics:  {', '.join(extras)}"
+    log.info(metrics_line)
+    print(f"{_LB}  {metrics_line}{_RST}")
 
 
 def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
@@ -799,8 +816,8 @@ def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
     for i in range(steps + 1):
         filled = int(bar_width * i / steps)
         bar = "#" * filled + "-" * (bar_width - filled)
-        print(f"\r  Waiting for route... [{bar}] {i * tick:4.1f}s", end="", flush=True)
-        if done.is_set():
+        print(f"\r{_LB}  Waiting for route... [{bar}] {i * tick:4.1f}s{_RST}", end="", flush=True)
+        if done.is_set() or pkt_evt.is_set():
             break
         time.sleep(tick)
 
@@ -814,19 +831,20 @@ def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
         pass
 
     if captured[0] is not None:
+        # Received the route response — this is success regardless of whether
+        # sendTraceRoute() has returned yet (race condition at timeout boundary).
         _log_tracer_details(captured[0], name, iface=iface)
-
-    if result["ok"] is True:
         return True, None
-    elif result["ok"] is False:
+
+    if result["ok"] is False:
         return False, result["error"]
-    else:
-        return False, f"timed out after {TRACEROUTE_TIMEOUT}s"
+
+    return False, f"timed out after {TRACEROUTE_TIMEOUT}s"
 
 
 def tracer_node(iface, node_id, name):
     """Send a single tracer to the given node and print the result."""
-    print(f"\n  tracer to {name}")
+    print(f"\n{_LB}  tracer to {name}{_RST}")
     hop_str = input("  Hop limit [3]: ").strip()
     hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
     log.info(f"tracer to {name} ({node_id}), hop_limit={hop_limit}")
@@ -834,15 +852,15 @@ def tracer_node(iface, node_id, name):
     success, err = _tracer_with_bar(iface, node_id, hop_limit, name=name)
     if success:
         log.info(f"tracer to {name} ({node_id}) completed successfully")
-        print("  Success.")
+        print(f"{_LB}  Done.{_RST}")
     else:
         log.error(f"tracer to {name} ({node_id}) failed: {err}")
-        print(f"  Failed: {err}")
+        print(f"{_LB}  Failed: {err}{_RST}")
 
 
 def tracer_repeated(iface, node_id, name):
     """Send a tracer repeatedly at a configurable interval until Enter is pressed."""
-    print(f"\n  Repeated tracer to {name}")
+    print(f"\n{_LB}  Repeated tracer to {name}{_RST}")
     hop_str = input("  Hop limit [3]: ").strip()
     hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
     interval_str = input("  Interval in seconds [30]: ").strip()
@@ -856,16 +874,16 @@ def tracer_repeated(iface, node_id, name):
         while not stop.is_set():
             last_result["count"] += 1
             count = last_result["count"]
-            print(f"\n  --- tracer #{count} to {name} ---")
+            print(f"\n{_LB}  --- tracer #{count} to {name} ---{_RST}")
             success, err = _tracer_with_bar(iface, node_id, hop_limit, name=name)
             last_result["success"] = success
             if success:
                 log.info(f"Repeated tracer #{count} to {name} ({node_id}) completed")
             else:
                 log.error(f"Repeated tracer #{count} to {name} ({node_id}) failed: {err}")
-                print(f"  Failed: {err}")
+                print(f"{_LB}  Failed: {err}{_RST}")
             if not stop.is_set():
-                print(f"  Next in {interval}s — press Enter to stop.")
+                print(f"{_LB}  Next in {interval}s — press Enter to stop.{_RST}")
             stop.wait(interval)
 
     t = threading.Thread(target=_trace_loop, daemon=True)
@@ -875,9 +893,9 @@ def tracer_repeated(iface, node_id, name):
     t.join(timeout=3)
     log.info(f"Repeated tracer to {name} ({node_id}) stopped")
     if last_result["success"] is True:
-        print(f"  Stopped. Last tracer #{last_result['count']}: success.")
+        print(f"{_LB}  Stopped. Last tracer #{last_result['count']}: success.{_RST}")
     elif last_result["success"] is False:
-        print(f"  Stopped. Last tracer #{last_result['count']}: failed.")
+        print(f"{_LB}  Stopped. Last tracer #{last_result['count']}: failed.{_RST}")
     else:
         print("  Stopped.")
 
@@ -998,7 +1016,7 @@ def show_node_info(iface):
                 "isFavorite": True,
             }))
         _fav_ids.add(node_id)
-        log.info(f"Extra favorite: {entry.get('name', raw_id)} ({raw_id})")
+        log.info(f"Loaded extra favorite from favorites file: {entry.get('name', raw_id)} ({raw_id})")
 
     log.info(f"Total favorites: {len(favorites)}")
 
@@ -1056,6 +1074,23 @@ def show_node_info(iface):
     _flash_thread = threading.Thread(target=_flash_worker, daemon=True)
     _flash_thread.start()
 
+    # ── receive watchdog ──────────────────────────────────────────────────
+    _watchdog_stop = threading.Event()
+
+    def _watchdog():
+        global _last_rx_time
+        _last_rx_time = time.time()   # reset on session start
+        while not _watchdog_stop.wait(60):
+            silent = time.time() - _last_rx_time
+            if silent >= _RX_WATCHDOG_SECS:
+                log.warning(
+                    f"No packets received for {int(silent)}s — "
+                    "BLE notifications may have stalled (hw issue on connected node)"
+                )
+
+    _watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
+    _watchdog_thread.start()
+
     # subscribe to all receive topics to detect activity from favorites
     from pubsub import pub as _pub
 
@@ -1075,6 +1110,21 @@ def show_node_info(iface):
     ]
     for _t in _rx_topics:
         _pub.subscribe(_note_rx, _t)
+
+    # detect unexpected BLE disconnect
+    _disconnected = threading.Event()
+
+    def _on_connection_lost(interface):
+        if not _disconnected.is_set():
+            _disconnected.set()
+            log.warning("BLE connection lost unexpectedly")
+            # Print a visible alert without disturbing the cursor position
+            sys.stdout.write(
+                f"\n\033[31m  !! BLE connection lost — press Enter to exit\033[0m\n"
+            )
+            sys.stdout.flush()
+
+    _pub.subscribe(_on_connection_lost, "meshtastic.connection.lost")
 
     # ── main display / command loop ───────────────────────────────────────
     def print_main():
@@ -1109,7 +1159,11 @@ def show_node_info(iface):
 
     try:
         while True:
+            if _disconnected.is_set():
+                break
             choice = input("  > ").strip().lower()
+            if _disconnected.is_set():
+                break
             if not choice:
                 confirm = input("  Really quit? [y/N]: ").strip().lower()
                 if confirm == "y":
@@ -1160,12 +1214,17 @@ def show_node_info(iface):
                 print("  Invalid — try d1, m2, r3, t4, rt4, or Enter to quit.")
     finally:
         _flash_stop.set()
+        _watchdog_stop.set()
         _flash_thread.join(timeout=1)
         for _t in _rx_topics:
             try:
                 _pub.unsubscribe(_note_rx, _t)
             except Exception:
                 pass
+        try:
+            _pub.unsubscribe(_on_connection_lost, "meshtastic.connection.lost")
+        except Exception:
+            pass
 
 
 def show_peer_detail(peer):
