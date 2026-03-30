@@ -932,6 +932,36 @@ def ping_favorites(iface, favorites):
     return responded
 
 
+_EXTRA_FAVORITES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "extra_favorites.json")
+_EXTRA_FAVORITES_TEMPLATE = [
+    {"id": "!xxxxxxxx", "name": "Example Node A — replace with real node id", "short": "EXA"},
+    {"id": "!yyyyyyyy", "name": "Example Node B — replace with real node id"},
+]
+
+
+def _load_extra_favorites():
+    """Load extra favorites from extra_favorites.json next to main.py.
+
+    Creates the file with example entries on first run so the user knows it exists.
+    Returns [] on any error.
+    """
+    try:
+        with open(_EXTRA_FAVORITES_PATH) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        try:
+            with open(_EXTRA_FAVORITES_PATH, "w") as f:
+                json.dump(_EXTRA_FAVORITES_TEMPLATE, f, indent=2)
+                f.write("\n")
+            log.info("Created extra_favorites.json with example entries")
+        except OSError as e:
+            log.warning(f"Could not create extra_favorites.json: {e}")
+        return []
+    except json.JSONDecodeError as e:
+        log.warning(f"extra_favorites.json parse error: {e}")
+        return []
+
+
 def show_node_info(iface):
     """Print info about the connected node and visible mesh peers."""
     my_num = iface.myInfo.my_node_num
@@ -945,7 +975,32 @@ def show_node_info(iface):
     nodes = iface.nodes or {}
     all_peers = [(k, v) for k, v in nodes.items() if k != my_num]
     favorites = [(k, v) for k, v in all_peers if v.get("isFavorite")]
-    log.info(f"Peers visible: {len(all_peers)}  favorites: {len(favorites)}")
+    log.info(f"Peers visible: {len(all_peers)}  radio favorites: {len(favorites)}")
+
+    # Merge extras from extra_favorites.json
+    _fav_ids = {nid for nid, _ in favorites}
+    for entry in _load_extra_favorites():
+        raw_id = entry.get("id", "")
+        try:
+            node_id = int(raw_id.lstrip("!"), 16)
+        except (ValueError, AttributeError):
+            log.warning(f"extra_favorites: invalid id {raw_id!r}, skipping")
+            continue
+        if node_id in _fav_ids:
+            continue  # already a favorite from the radio
+        if node_id in nodes:
+            favorites.append((node_id, nodes[node_id]))
+        else:
+            name = entry.get("name") or raw_id
+            short = entry.get("short") or name[:4]
+            favorites.append((node_id, {
+                "user": {"id": raw_id, "longName": name, "shortName": short},
+                "isFavorite": True,
+            }))
+        _fav_ids.add(node_id)
+        log.info(f"Extra favorite: {entry.get('name', raw_id)} ({raw_id})")
+
+    log.info(f"Total favorites: {len(favorites)}")
 
     header = f"{node_name}  |  !{my_num:08x}  |  fw {fw}  |  hw {hw}"
 
@@ -1335,6 +1390,8 @@ def main():
         t.join(timeout=3)
         log.info("=== newscan session ended ===")
         print("Node Disconnected. Bye!")
+        sys.stdout.flush()
+        os._exit(0)  # bypass meshtastic's atexit disconnect handler which blocks indefinitely
 
 
 if __name__ == "__main__":

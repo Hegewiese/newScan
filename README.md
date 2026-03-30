@@ -11,7 +11,7 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - Startup requirements check (platform, Python, venv, Bluetooth)
 - Smart device discovery — checks paired devices via `bluetoothctl` (Linux), falls back to full BLE scan
 - Fast BLE connection with animated spinner
-- **Favorite nodes list** — last seen, SNR, hop count; ping results shown with green/orange status dots
+- **Favorite nodes list** — last seen, SNR, hop count; ping results shown with green/orange status dots; supplemented by `extra_favorites.json`
 - **Ping Favorites** — sends a NodeInfo request to each favorite (5 s apart), shows who responded
 - **Node details** — ID, short name, hardware, last seen, SNR, RSSI, hops, GPS, battery, voltage, telemetry
 - **Send message** — single or repeated at a configurable interval; ACK/NAK reported per send
@@ -82,6 +82,29 @@ Favorite peers: 3 of 18 visible
 
 After `pf`, each node gets a green `●` (responded) or orange `●` (no response).
 
+### Extra favorites
+
+Nodes can be added to the favorites list independently of what the radio has marked as favorite. Create or edit `extra_favorites.json` in the project directory:
+
+```json
+[
+  {"id": "!aabbccdd", "name": "Base Station", "short": "BS"},
+  {"id": "!11223344", "name": "Remote Repeater"}
+]
+```
+
+| Field | Required | Description |
+|---|---|---|
+| `id` | yes | Node ID as hex string, e.g. `!aabbccdd` |
+| `name` | yes | Display name (used when node is not visible in the mesh) |
+| `short` | no | Short name (defaults to first 4 characters of `name`) |
+
+**Behaviour:**
+- If the node is currently visible in the mesh, live radio data is used (name comes from the radio).
+- If the node is not visible, it appears with the name from the file and `N/A` for SNR / hops / last seen.
+- If the node is already marked as a favorite on the radio, the file entry is ignored (no duplication).
+- The file is created automatically with placeholder examples on first run if it does not exist.
+
 ### Commands
 
 | Command | Action |
@@ -117,6 +140,7 @@ Relay nodes are resolved to full names where known (`via Alice` instead of `via 
 ```
 newscan/
 ├── main.py
+├── extra_favorites.json                 # auto-created on first run; edit to add extra favorites
 ├── newscan.log                          # auto-created
 ├── <NodeName>_<timestamp>_config.json  # auto-created on export
 └── README.md
