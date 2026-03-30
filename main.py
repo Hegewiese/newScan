@@ -389,18 +389,25 @@ def start_message_log(iface) -> None:
             # strip the "via " prefix to get just the relay node name
             relay_name = relay_raw[4:] if relay_raw.startswith("via ") else relay_raw
             key = relay_name if relay_name else "direct"
+            snr  = packet.get("rxSnr")
+            rssi = packet.get("rxRssi")
             with _inflow_lock:
                 if key not in _inflow_data:
                     _inflow_data[key] = {
                         "name": key, "total": 0,
                         "text": 0, "position": 0, "user": 0,
                         "telemetry": 0, "neighborinfo": 0, "traceroute": 0,
+                        "snr_sum": 0.0, "rssi_sum": 0, "sig_count": 0,
                         "last_ts": time.time(),
                     }
                 d = _inflow_data[key]
                 d["total"]   += 1
                 d[pkt_type]  += 1
                 d["last_ts"]  = time.time()
+                if snr is not None:
+                    d["snr_sum"]   += snr
+                    d["rssi_sum"]  += (rssi or 0)
+                    d["sig_count"] += 1
         return _handler
 
     _inflow_topics = [
@@ -1072,9 +1079,10 @@ def show_inflow_view(iface):
         h1  = (f"  Inflow View  —  {total_pkts} packet{'s' if total_pkts != 1 else ''} "
                f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
                f"(session {elapsed_str})")
-        sep = "  " + "─" * 74
+        sep = "  " + "─" * 86
         hdr = (f"  {'Via':<22}  {'Pkts':>5}  {'':<{BAR_W}}  "
-               f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  {'last':>6}")
+               f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  "
+               f"{'SNR':>5} {'RSSI':>6}  {'last':>6}")
 
         lines = [h1, sep, hdr, sep]
 
@@ -1086,7 +1094,11 @@ def show_inflow_view(iface):
                         f"{d['telemetry']:>3} {d['neighborinfo']:>3} {d['traceroute']:>3}")
             ago_s    = int(time.time() - d["last_ts"])
             ago_str  = f"{ago_s // 60}m{ago_s % 60:02d}s" if ago_s >= 60 else f"{ago_s}s"
-            lines.append(f"  {name}  {d['total']:>5}  {bar}  {types}  {ago_str:>6}")
+            sc = d["sig_count"]
+            snr_str  = f"{d['snr_sum']  / sc:>4.1f}" if sc else "   —"
+            rssi_str = f"{d['rssi_sum'] // sc:>4}"   if sc else "   —"
+            lines.append(f"  {name}  {d['total']:>5}  {bar}  {types}  "
+                         f"{snr_str}dB {rssi_str}dBm  {ago_str:>6}")
 
         if not rows_data:
             lines.append("  (no packets received yet — waiting...)")

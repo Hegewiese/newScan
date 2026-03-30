@@ -17,6 +17,7 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - **Node details** — ID, short name, hardware, last seen, SNR, RSSI, hops, GPS, battery, voltage, telemetry
 - **Send message** — single or repeated at a configurable interval; ACK/NAK reported per send
 - **Tracer** — single or repeated traceroute with live progress bar; full route + per-hop SNR logged
+- **Inflow View** — live session dashboard grouped by relay/via node: packet counts per type, avg SNR and RSSI of the last-hop link, time since last packet
 - **Config export** — `localConfig`, `moduleConfig`, and channels to a timestamped JSON file
 - **Live log footer** — last 8 lines of `newscan.log` always visible at the bottom of the terminal
 - All received packets logged with symbols: `✉` text · `⊕` position · `◉` nodeinfo · `⊡⊛` telemetry · `⬡` neighbors · `⇌` traceroute · `⌁` ping
@@ -77,7 +78,7 @@ Favorite peers: 3 of 18 visible
   [2] ● Bob          15m ago      SNR: -8.5   2 hops
   [3] ● Charlie      1h ago       SNR: N/A    N/A
 
-  d<n> Node Details       m<n> Message          t<n> tracer         Enter to quit
+  d<n> Node Details       m<n> Message          t<n> tracer         i   Inflow View
   pf  Ping Favorites      r<n> Repeat msg        rt<n> Repeat trace  e Export config
 ```
 
@@ -116,6 +117,7 @@ Nodes can be added to the favorites list independently of what the radio has mar
 | `t<n>` | Single traceroute with progress bar |
 | `rt<n>` | Repeated traceroute at a chosen interval |
 | `pf` | Ping all favorites via NodeInfo request |
+| `i` | Inflow View — live relay traffic dashboard |
 | `e` | Export node config to JSON |
 | Enter | Quit (asks for confirmation) |
 
