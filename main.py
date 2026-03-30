@@ -173,6 +173,11 @@ _inflow_data: dict = {}   # {node_id_int: {name, total, text, position, user,
                            #                relay, last_ts}}
 _inflow_start_ts: float = 0.0
 
+# ---------------------------------------------------------------------------
+# Route cache — populated whenever a traceroute completes successfully
+# ---------------------------------------------------------------------------
+_route_cache: dict = {}   # {dest_node_num_int: {ts, hops: [{name, snr_raw}]}}
+
 BROADCAST = 0xFFFFFFFF
 
 
@@ -719,7 +724,7 @@ def _peer_name(peer):
 
 
 def send_message(iface, node_id, name):
-    """Prompt for a message and send it to the given node."""
+    """Prompt for a message, send it, then show the outbound routing view."""
     print(f"\n  Sending message to {name}")
     text = input("  Message: ").strip()
     if not text:
@@ -727,23 +732,37 @@ def send_message(iface, node_id, name):
         print("  Cancelled.")
         return
 
-    def onAckNak(packet):
+    ack_event  = threading.Event()
+    ack_result = {"packet": None, "elapsed": None, "error": None}
+    send_time  = time.time()
+
+    def _on_ack(packet):
+        if ack_event.is_set():
+            return
         routing = packet.get("decoded", {}).get("routing", {})
-        error = routing.get("errorReason", "NONE")
+        error   = routing.get("errorReason", "NONE")
+        ack_result["packet"]  = packet
+        ack_result["elapsed"] = time.time() - send_time
+        ack_result["error"]   = error
         if error == "NONE":
             log.info(f"ACK received from {name} ({node_id})")
-            print(f"\n  ACK received from {name}.")
         else:
             log.warning(f"NAK from {name} ({node_id}): {error}")
-            print(f"\n  NAK from {name}: {error}")
+        ack_event.set()
 
     try:
-        iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
+        sent_pkt = iface.sendText(
+            f"[{time.strftime('%H:%M:%S')}] {text}",
+            destinationId=node_id, wantAck=True, onResponse=_on_ack,
+        )
+        pkt_id = sent_pkt.get("id") if isinstance(sent_pkt, dict) else None
         log.info(f"{_ch_label(iface, 0)}  Message sent to {name} ({node_id}): {text!r}  \033[31m✉\033[0m")
-        print("  Sent. (Waiting for ACK...)")
     except Exception as e:
         log.exception(f"send_message to {name} ({node_id}) failed: {e}")
         print(f"  Failed: {e}")
+        return
+
+    show_outbound_view(iface, node_id, name, pkt_id, text, send_time, ack_event, ack_result)
 
 
 def send_repeated(iface, node_id, name):
@@ -859,6 +878,14 @@ def _log_tracer_details(packet: dict, name: str, iface=None) -> None:
     metrics_line = f"tracer [{name}] metrics:  {', '.join(extras)}"
     log.info(metrics_line)
     print(f"{_LB}  {metrics_line}{_RST}")
+
+    # --- update route cache so outbound view can show the last known path ---
+    if isinstance(frm, int):
+        hops = []
+        for i, node_num in enumerate(route):
+            snr_raw = snr_towards[i] if i < len(snr_towards) else None
+            hops.append({"name": _n(node_num), "snr_raw": snr_raw})
+        _route_cache[frm] = {"ts": time.time(), "hops": hops, "dest": _n(frm)}
 
 
 def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
@@ -1060,6 +1087,242 @@ def _load_extra_favorites():
     except json.JSONDecodeError as e:
         log.warning(f"extra_favorites.json parse error: {e}")
         return []
+
+
+def show_outbound_view(iface, node_id, dest_name, pkt_id, message_text,
+                       send_time, ack_event, ack_result):
+    """Live routing-journey view shown immediately after a DM is sent.
+
+    Displays relay echoes (opportunistic — only visible if relay nodes are in
+    direct radio range), ACK timing, signal quality, hop count, and the
+    inferred next-hop that Meshtastic will use for future DMs to this node.
+    """
+    from pubsub import pub
+
+    _stop        = threading.Event()
+    _relay_lock  = threading.Lock()
+    _relay_events = []   # [{name, snr, rssi, hops_used, elapsed}]
+
+    my_num = iface.myInfo.my_node_num
+
+    # -- dest node context (hops / SNR as last known by node list) ----------
+    dest_num = None
+    if isinstance(node_id, int):
+        dest_num = node_id
+    elif isinstance(node_id, str) and node_id.startswith("!"):
+        try:
+            dest_num = int(node_id[1:], 16)
+        except ValueError:
+            pass
+    dest_node  = ((getattr(iface, "nodesByNum", None) or {}).get(dest_num) or {})
+    known_hops = dest_node.get("hopsAway")
+    known_snr  = dest_node.get("snr")
+
+    # -- relay echo listener ------------------------------------------------
+    def _on_echo(packet, interface=None, **kwargs):
+        if _stop.is_set():
+            return
+        if packet.get("from") != my_num:
+            return
+        if pkt_id is not None and packet.get("id") != pkt_id:
+            return
+        relay_byte = packet.get("relayNode")
+        if not relay_byte:
+            return
+        rname = f"!..{relay_byte:02x}"
+        for num, node in (getattr(iface, "nodesByNum", None) or {}).items():
+            if isinstance(num, int) and (num & 0xFF) == relay_byte:
+                u = node.get("user", {})
+                rname = u.get("longName") or u.get("shortName") or f"!{num:08x}"
+                break
+        hop_start = packet.get("hopStart")
+        hop_limit = packet.get("hopLimit")
+        hops_used = (hop_start - hop_limit) if (hop_start is not None and hop_limit is not None) else None
+        with _relay_lock:
+            if not any(r["name"] == rname for r in _relay_events):
+                _relay_events.append({
+                    "name":      rname,
+                    "snr":       packet.get("rxSnr"),
+                    "rssi":      packet.get("rxRssi"),
+                    "hops_used": hops_used,
+                    "elapsed":   time.time() - send_time,
+                })
+
+    # -- ACK detector via pubsub --------------------------------------------
+    # onResponse on BLE is unreliable; subscribe to the routing topic directly
+    # and match by requestId so we catch the ACK regardless.
+    def _on_routing_ack(packet, interface=None, **kwargs):
+        if _stop.is_set() or ack_event.is_set():
+            return
+        if packet.get("from") != dest_num:
+            return
+        req_id = packet.get("requestId")
+        # Only filter by requestId when both sides are known — the field is
+        # often absent (proto3 default 0 / omitted) on the BLE path.
+        if pkt_id is not None and req_id is not None and req_id != pkt_id:
+            return
+        routing = packet.get("decoded", {}).get("routing", {})
+        error   = routing.get("errorReason", "NONE")
+        ack_result["packet"]  = packet
+        ack_result["elapsed"] = time.time() - send_time
+        ack_result["error"]   = error
+        ack_event.set()
+        if error == "NONE":
+            log.info(f"ACK from {dest_name} ({node_id}) [pubsub]")
+        else:
+            log.warning(f"NAK from {dest_name} ({node_id}) [pubsub]: {error}")
+
+    _echo_topics = [
+        "meshtastic.receive.text",
+        "meshtastic.receive.position",
+        "meshtastic.receive.user",
+        "meshtastic.receive.telemetry",
+        "meshtastic.receive.neighborinfo",
+    ]
+    _subs = [(t, pub.subscribe(_on_echo, t)) for t in _echo_topics]
+    _subs.append(("meshtastic.receive.routing",
+                  pub.subscribe(_on_routing_ack, "meshtastic.receive.routing")))
+
+    # -- render -------------------------------------------------------------
+    def _render():
+        elapsed = time.time() - send_time
+        pkt_str = f" #{pkt_id:08x}" if isinstance(pkt_id, int) else ""
+        sep_dbl = "  " + "═" * 76
+
+        lines = [
+            f"  Outbound: DM to {dest_name}{pkt_str}  |  t+{elapsed:.1f}s",
+            sep_dbl,
+            "",
+        ]
+
+        preview = message_text[:50] + ("…" if len(message_text) > 50 else "")
+        lines.append(f"  ► Sent   \"{preview}\"  →  {dest_name}")
+
+        # distance / route info
+        cached = _route_cache.get(dest_num) if dest_num is not None else None
+        if cached:
+            age_s   = int(time.time() - cached["ts"])
+            age_str = f"{age_s // 60}m {age_s % 60}s" if age_s >= 60 else f"{age_s}s"
+            hops    = cached["hops"]
+            if hops:
+                _fmt_snr = lambda raw: "" if (raw is None or raw == _UNK_SNR) else f" ({raw / 4:+.1f}dB)"
+                route_parts = (["[YOU]"]
+                                + [f"[{h['name']}]{_fmt_snr(h['snr_raw'])}" for h in hops]
+                                + [f"[{dest_name}]"])
+                lines.append(f"    Route ({age_str} ago):  " + " → ".join(route_parts))
+            else:
+                lines.append(f"    Route ({age_str} ago):  [YOU] → [{dest_name}]  (direct)")
+        elif known_hops == 0:
+            lines.append(f"    [YOU] ────────────────────── [{dest_name}]  (direct link)")
+        elif known_hops is not None:
+            snr_sfx = f"  last SNR {known_snr:+.1f}dB" if known_snr is not None else ""
+            hops_vis = " ── ? " * known_hops
+            lines.append(f"    [YOU]{hops_vis}── [{dest_name}]"
+                         f"  ({known_hops} hop{'s' if known_hops != 1 else ''}{snr_sfx})")
+            lines.append(f"    Intermediate nodes unknown — run t{{n}} to trace the full path")
+        else:
+            lines.append(f"    [YOU] ── ? ── ... ── [{dest_name}]  (distance unknown)")
+            lines.append(f"    Run t{{n}} to discover the route")
+        lines.append("")
+
+        # relay echo table
+        lines.append("  ─── Relay echoes (re-broadcasts of our packet we could hear) ─────────────────")
+        with _relay_lock:
+            relays = list(_relay_events)
+
+        if relays:
+            lines.append(f"  {'Node':<22}  {'SNR':>5}  {'RSSI':>6}  {'hops':>4}  {'at':>6}")
+            lines.append("  " + "─" * 52)
+            for r in sorted(relays, key=lambda x: x["elapsed"]):
+                snr_s  = f"{r['snr']:>+5.1f}"  if r["snr"]      is not None else "    —"
+                rssi_s = f"{r['rssi']:>6}"      if r["rssi"]     is not None else "     —"
+                hops_s = str(r["hops_used"])    if r["hops_used"] is not None else "—"
+                at_s   = f"{r['elapsed']:.1f}s"
+                lines.append(f"  {r['name']:<22}  {snr_s}  {rssi_s}  {hops_s:>4}  {at_s:>6}")
+        else:
+            if known_hops is not None and known_hops > 1:
+                lines.append(f"  (none observed — expected: relay nodes are {known_hops} hops away,")
+                lines.append( "   almost certainly beyond direct radio range of this device)")
+            elif known_hops == 1:
+                lines.append( "  (none observed — the single relay node may be just out of direct range,")
+                lines.append( "   or the meshtastic library deduplicated the echo before delivery)")
+            else:
+                lines.append( "  (none observed — relay nodes may be out of direct earshot, or")
+                lines.append( "   the meshtastic library deduplicates re-broadcasts before delivery)")
+        lines.append("")
+
+        # ACK / return path
+        lines.append("  ─── ACK return path ────────────────────────────────────────────────────────")
+        ack_pkt = ack_result["packet"]
+        ack_el  = ack_result["elapsed"]
+        ack_err = ack_result["error"]
+
+        if ack_pkt is not None:
+            if ack_err == "NONE":
+                ack_snr  = ack_pkt.get("rxSnr")
+                ack_rssi = ack_pkt.get("rxRssi")
+                rb       = ack_pkt.get("relayNode")
+                hs       = ack_pkt.get("hopStart")
+                hl       = ack_pkt.get("hopLimit")
+                ack_hops = (hs - hl) if (hs is not None and hl is not None) else None
+
+                relay_name = None
+                if rb:
+                    relay_name = f"!..{rb:02x}"
+                    for num, node in (getattr(iface, "nodesByNum", None) or {}).items():
+                        if isinstance(num, int) and (num & 0xFF) == rb:
+                            u = node.get("user", {})
+                            relay_name = u.get("longName") or u.get("shortName") or f"!{num:08x}"
+                            break
+
+                snr_s  = f"  SNR {ack_snr:+.1f}dB"  if ack_snr  is not None else ""
+                rssi_s = f"  RSSI {ack_rssi}dBm"     if ack_rssi is not None else ""
+                hops_s = f"  {ack_hops} hop{'s' if ack_hops != 1 else ''}" if ack_hops is not None else ""
+                via_s  = f"  via {relay_name}"        if relay_name else "  (direct)"
+
+                lines.append(f"  t+{ack_el:.2f}s  \u2713 ACK from {dest_name}{via_s}{snr_s}{rssi_s}{hops_s}")
+
+                if relay_name:
+                    lines.append(f"  [{dest_name}] \u2500\u2500[{relay_name}]\u2500\u2500 [YOU]")
+                    lines.append(f"  \u2192 Next-hop learned: {relay_name} will relay future DMs to {dest_name}")
+                else:
+                    lines.append(f"  [{dest_name}] \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500 [YOU]  (direct)")
+                    lines.append(f"  \u2192 Direct link confirmed \u2014 no relay needed")
+            else:
+                lines.append(f"  t+{ack_el:.2f}s  \u2717 NAK from {dest_name}: {ack_err}")
+        else:
+            lines.append(f"  t+{elapsed:.1f}s  \u2026 waiting for ACK")
+
+        lines += ["", "  Press Enter to return to menu"]
+        return lines
+
+    # -- refresh worker & entry point ---------------------------------------
+    def _refresh():
+        while not _stop.wait(1.0):
+            new_lines = _render()
+            buf = "\0337"
+            for i, line in enumerate(new_lines, 1):
+                buf += f"\033[{i};1H\033[K{line}"
+            buf += "\0338"
+            sys.stdout.write(buf)
+            sys.stdout.flush()
+
+    clear_screen()
+    for line in _render():
+        print(line)
+
+    _t = threading.Thread(target=_refresh, daemon=True)
+    _t.start()
+    try:
+        input("")
+    finally:
+        _stop.set()
+        _t.join(timeout=1)
+        for topic, sub in _subs:
+            try:
+                pub.unsubscribe(sub, topic)
+            except Exception:
+                pass
 
 
 def show_inflow_view(iface):
