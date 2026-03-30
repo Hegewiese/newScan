@@ -164,6 +164,15 @@ _rx_subs: list = []        # list of (callback, topic) registered by start_messa
 _last_rx_time: float = 0.0  # epoch timestamp of last received packet — updated by start_message_log
 _RX_WATCHDOG_SECS = 300     # warn if no packet received for this long (5 minutes)
 
+# ---------------------------------------------------------------------------
+# Inflow view — session-wide packet counter (populated by start_message_log)
+# ---------------------------------------------------------------------------
+_inflow_lock      = threading.Lock()
+_inflow_data: dict = {}   # {node_id_int: {name, total, text, position, user,
+                           #                telemetry, neighborinfo, traceroute,
+                           #                relay, last_ts}}
+_inflow_start_ts: float = 0.0
+
 BROADCAST = 0xFFFFFFFF
 
 
@@ -335,6 +344,10 @@ def start_message_log(iface) -> None:
     # ── traceroute received from others ────────────────────────────────────
     def _on_traceroute_rx(packet, interface):
         try:
+            # Skip responses to our own traceroutes — _log_tracer_details already
+            # logs those in full detail (towards / back / metrics).
+            if packet.get("to") == my_num:
+                return
             sender = _rx_resolve(interface, packet.get("from"))
             dest   = _rx_resolve(interface, packet.get("to"))
             relay  = _rx_relay(interface, packet)
@@ -359,7 +372,50 @@ def start_message_log(iface) -> None:
     for cb, topic in subs:
         pub.subscribe(cb, topic)
         pub.subscribe(_stamp_rx, topic)
-    _rx_subs = subs + [(_stamp_rx, t) for _, t in subs]
+
+    # ── inflow tracking — count every received packet per source node ──────
+    global _inflow_start_ts
+    _inflow_start_ts = time.time()
+    with _inflow_lock:
+        _inflow_data.clear()
+
+    def _make_inflow_handler(pkt_type):
+        def _handler(packet, interface):
+            if packet.get("from") == my_num:
+                return
+            if packet.get("from") is None:
+                return
+            relay_raw = _rx_relay(interface, packet)
+            # strip the "via " prefix to get just the relay node name
+            relay_name = relay_raw[4:] if relay_raw.startswith("via ") else relay_raw
+            key = relay_name if relay_name else "direct"
+            with _inflow_lock:
+                if key not in _inflow_data:
+                    _inflow_data[key] = {
+                        "name": key, "total": 0,
+                        "text": 0, "position": 0, "user": 0,
+                        "telemetry": 0, "neighborinfo": 0, "traceroute": 0,
+                        "last_ts": time.time(),
+                    }
+                d = _inflow_data[key]
+                d["total"]   += 1
+                d[pkt_type]  += 1
+                d["last_ts"]  = time.time()
+        return _handler
+
+    _inflow_topics = [
+        ("text",         "meshtastic.receive.text"),
+        ("position",     "meshtastic.receive.position"),
+        ("user",         "meshtastic.receive.user"),
+        ("telemetry",    "meshtastic.receive.telemetry"),
+        ("neighborinfo", "meshtastic.receive.neighborinfo"),
+        ("traceroute",   "meshtastic.receive.traceroute"),
+    ]
+    _inflow_subs = [(_make_inflow_handler(pt), topic) for pt, topic in _inflow_topics]
+    for cb, topic in _inflow_subs:
+        pub.subscribe(cb, topic)
+
+    _rx_subs = subs + [(_stamp_rx, t) for _, t in subs] + _inflow_subs
 
 
 def stop_message_log() -> None:
@@ -999,6 +1055,68 @@ def _load_extra_favorites():
         return []
 
 
+def show_inflow_view(iface):
+    """Live inflow traffic view — every received packet counted per source node."""
+    _stop = threading.Event()
+    BAR_W = 20
+
+    def _render():
+        with _inflow_lock:
+            snap = {k: dict(v) for k, v in _inflow_data.items()}
+        rows_data  = sorted(snap.items(), key=lambda x: x[1]["total"], reverse=True)
+        total_pkts = sum(v["total"] for v in snap.values())
+        elapsed    = int(time.time() - _inflow_start_ts)
+        elapsed_str = f"{elapsed // 60}m {elapsed % 60}s" if elapsed >= 60 else f"{elapsed}s"
+        max_total  = rows_data[0][1]["total"] if rows_data else 1
+
+        h1  = (f"  Inflow View  —  {total_pkts} packet{'s' if total_pkts != 1 else ''} "
+               f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
+               f"(session {elapsed_str})")
+        sep = "  " + "─" * 74
+        hdr = (f"  {'Via':<22}  {'Pkts':>5}  {'':<{BAR_W}}  "
+               f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  {'last':>6}")
+
+        lines = [h1, sep, hdr, sep]
+
+        for node_id, d in rows_data:
+            bar_fill = int(d["total"] / max_total * BAR_W)
+            bar      = "\u2588" * bar_fill + "\u2591" * (BAR_W - bar_fill)
+            name     = d["name"][:22].ljust(22)
+            types    = (f"{d['text']:>3} {d['position']:>3} {d['user']:>3} "
+                        f"{d['telemetry']:>3} {d['neighborinfo']:>3} {d['traceroute']:>3}")
+            ago_s    = int(time.time() - d["last_ts"])
+            ago_str  = f"{ago_s // 60}m{ago_s % 60:02d}s" if ago_s >= 60 else f"{ago_s}s"
+            lines.append(f"  {name}  {d['total']:>5}  {bar}  {types}  {ago_str:>6}")
+
+        if not rows_data:
+            lines.append("  (no packets received yet — waiting...)")
+
+        lines += ["", "  Press Enter to return to menu"]
+        return lines
+
+    def _refresh_worker():
+        while not _stop.wait(1.0):
+            lines = _render()
+            buf = "\0337"
+            for i, line in enumerate(lines, 1):
+                buf += f"\033[{i};1H\033[K{line}"
+            buf += "\0338"
+            sys.stdout.write(buf)
+            sys.stdout.flush()
+
+    clear_screen()
+    for line in _render():
+        print(line)
+
+    _t = threading.Thread(target=_refresh_worker, daemon=True)
+    _t.start()
+    try:
+        input("")
+    finally:
+        _stop.set()
+        _t.join(timeout=1)
+
+
 def show_node_info(iface):
     """Print info about the connected node and visible mesh peers."""
     my_num = iface.myInfo.my_node_num
@@ -1195,7 +1313,7 @@ def show_node_info(iface):
             else:
                 print(f"  [{i}]   {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
         c = 22
-        print(f"\n  {'d<n> Node Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}Enter to quit"
+        print(f"\n  {'d<n> Node Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}{'i   Inflow View'.ljust(c)}Enter to quit"
               f"\n  {'pf  Ping Favorites'.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}e Export config")
 
     print_main()
@@ -1226,6 +1344,11 @@ def show_node_info(iface):
                 clear_screen()
                 results = ping_favorites(iface, favorites)
                 ping_results.update(results)
+                print_main()
+                continue
+            if choice == "i":
+                clear_screen()
+                show_inflow_view(iface)
                 print_main()
                 continue
             if choice[:2] == "rt":
