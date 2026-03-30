@@ -13,6 +13,25 @@ import sys
 import threading
 import time
 
+# Firmware update checking
+try:
+    from firmware_check import check_device_firmware, FirmwareChecker
+except ImportError:
+    # Define dummy functions if module not found
+    def check_device_firmware(iface):
+        return {"error": "firmware_check module not found", "message": "Update checking disabled"}
+    
+    class FirmwareChecker:
+        @staticmethod
+        def check_firmware_update(current_version, hw_model=None):
+            return {"error": "firmware_check module not found", "current_version": current_version}
+
+        @staticmethod
+        def format_update_message(check_result, verbose=True):
+            if check_result.get("error"):
+                return f"⚠  {check_result['error']}"
+            return f"Current: {check_result.get('current_version', 'N/A')}"
+
 # Re-exec into meshtastic_venv before attempting any third-party imports.
 if sys.prefix == sys.base_prefix:
     _venv_python = os.path.join(
@@ -987,8 +1006,16 @@ def show_node_info(iface):
     node_name = iface.getLongName() or "Unknown"
     fw = metadata.firmware_version if metadata else "N/A"
     hw = metadata.hw_model if metadata else "N/A"
+    try:
+        from meshtastic.protobuf import mesh_pb2 as _mesh_pb2
+        hw_display = _mesh_pb2.HardwareModel.Name(hw)
+    except Exception:
+        hw_display = str(hw)
 
-    log.info(f"Local node: {node_name}  !{my_num:08x}  fw {fw}  hw {hw}")
+    log.info(f"Local node: {node_name}  !{my_num:08x}  fw {fw}  hw {hw_display}")
+
+    # Firmware update check — appended to header line, populated by background thread
+    _fw_status = ["  |  fw: checking..."]
 
     nodes = iface.nodes or {}
     all_peers = [(k, v) for k, v in nodes.items() if k != my_num]
@@ -1019,8 +1046,6 @@ def show_node_info(iface):
         log.info(f"Loaded extra favorite from favorites file: {entry.get('name', raw_id)} ({raw_id})")
 
     log.info(f"Total favorites: {len(favorites)}")
-
-    header = f"{node_name}  |  !{my_num:08x}  |  fw {fw}  |  hw {hw}"
 
     _GREEN    = "\033[32m"
     _ORANGE   = "\033[33m"
@@ -1126,12 +1151,34 @@ def show_node_info(iface):
 
     _pub.subscribe(_on_connection_lost, "meshtastic.connection.lost")
 
+    # ── firmware check (background, so GitHub API call doesn't block startup) ──
+    def _fw_check_worker():
+        try:
+            result = FirmwareChecker.check_firmware_update(fw)
+            msg = FirmwareChecker.format_update_message(result, verbose=False)
+        except Exception:
+            msg = "⚠  check failed"
+        _fw_status[0] = f"  |  {msg}"
+        # Repaint rows 1-3 (separator / header / separator) in-place
+        h   = f"{node_name}  |  !{my_num:08x}  |  hw {hw_display}{_fw_status[0]}"
+        sep = "=" * len(h)
+        buf = ("\0337"
+               + f"\033[1;1H\033[K{sep}"
+               + f"\033[2;1H\033[K{h}"
+               + f"\033[3;1H\033[K{sep}"
+               + "\0338")
+        sys.stdout.write(buf)
+        sys.stdout.flush()
+
+    threading.Thread(target=_fw_check_worker, daemon=True).start()
+
     # ── main display / command loop ───────────────────────────────────────
     def print_main():
         clear_screen()
-        print("=" * len(header))
-        print(header)
-        print("=" * len(header))
+        h = f"{node_name}  |  !{my_num:08x}  |  hw {hw_display}{_fw_status[0]}"
+        print("=" * len(h))
+        print(h)
+        print("=" * len(h))
         if not favorites:
             print("\nNo favorite nodes visible yet.")
             return

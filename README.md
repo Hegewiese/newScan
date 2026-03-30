@@ -11,6 +11,7 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - Startup requirements check (platform, Python, venv, Bluetooth)
 - Smart device discovery — checks paired devices via `bluetoothctl` (Linux), falls back to full BLE scan
 - Fast BLE connection with animated spinner
+- **Firmware update check** — compares connected node firmware against latest GitHub release in the background; result shown in the header row as `✅ up to date` or `🔴 <new version> available`
 - **Favorite nodes list** — last seen, SNR, hop count; ping results shown with green/orange status dots; supplemented by `extra_favorites.json`
 - **Ping Favorites** — sends a NodeInfo request to each favorite (5 s apart), shows who responded
 - **Node details** — ID, short name, hardware, last seen, SNR, RSSI, hops, GPS, battery, voltage, telemetry
@@ -43,7 +44,7 @@ sudo usermod -aG bluetooth $USER   # log out and back in
 ```bash
 python3 -m venv meshtastic_venv
 source meshtastic_venv/bin/activate
-pip install meshtastic bleak
+pip install meshtastic bleak requests
 ```
 
 If `meshtastic_venv/` is already present, running `python3 main.py` outside the venv will offer to restart inside it automatically.
@@ -61,13 +62,13 @@ python main.py
 1. Requirements check (platform / Python / venv / Bluetooth)
 2. Known paired devices listed (Linux); full BLE scan if none found
 3. Select device → spinner while connecting
-4. Main view appears
+4. Main view appears; firmware check runs in background and updates the header
 
 ### Main view
 
 ```
 ================================================================
-MyNode  |  !04332f58  |  fw 2.5.x  |  hw HELTEC_V3
+MyNode  |  !04332f58  |  hw HELTEC_V3  |  ✅ 2.5.x
 ================================================================
 
 Favorite peers: 3 of 18 visible
@@ -140,6 +141,7 @@ Relay nodes are resolved to full names where known (`via Alice` instead of `via 
 ```
 newscan/
 ├── main.py
+├── firmware_check.py                    # firmware version checker (GitHub API)
 ├── extra_favorites.json                 # auto-created on first run; edit to add extra favorites
 ├── newscan.log                          # auto-created
 ├── <NodeName>_<timestamp>_config.json  # auto-created on export
