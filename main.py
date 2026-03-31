@@ -614,6 +614,7 @@ def start_message_log(iface) -> None:
                         "text": 0, "position": 0, "user": 0,
                         "telemetry": 0, "neighborinfo": 0, "traceroute": 0,
                         "snr_sum": 0.0, "rssi_sum": 0, "sig_count": 0,
+                        "snr_history": [],
                         "sources": {},
                         "last_ts": time.time(),
                     }
@@ -627,6 +628,9 @@ def start_message_log(iface) -> None:
                     d["snr_sum"]   += snr
                     d["rssi_sum"]  += (rssi or 0)
                     d["sig_count"] += 1
+                    d["snr_history"].append(snr)
+                    if len(d["snr_history"]) > 8:
+                        d["snr_history"].pop(0)
         return _handler
 
     _inflow_topics = [
@@ -1667,7 +1671,7 @@ def show_inflow_view(iface):
 
     def _render():
         with _inflow_lock:
-            snap = {k: {**v, "src_count": len(v["sources"]), "sources": dict(v["sources"])} for k, v in _inflow_data.items()}
+            snap = {k: {**v, "src_count": len(v["sources"]), "sources": dict(v["sources"]), "snr_history": list(v["snr_history"])} for k, v in _inflow_data.items()}
         rows_data  = sorted(snap.items(), key=lambda x: x[1]["total"], reverse=True)
         total_pkts = sum(v["total"] for v in snap.values())
         elapsed    = int(time.time() - _inflow_start_ts)
@@ -1677,10 +1681,10 @@ def show_inflow_view(iface):
         h1  = (f"  Inflow View  —  {total_pkts} packet{'s' if total_pkts != 1 else ''} "
                f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
                f"(session {elapsed_str})")
-        sep = "  " + "─" * 119
-        hdr = (f"  {'Last Hop':<22}  {'Hops Out':>8}  {'Dist':>6}  {'last':>6}  {'·':>1}  {'src':>4}  {'Pkts':>5}  {'':<{BAR_W}}  "
+        sep = "  " + "─" * 126
+        hdr = (f"  {'Last Hop':<22}  {'Hops Out':>8}  {'Dist':>6}  {'last':>6}  {'src':>4}  {'Pkts':>5}  {'':<{BAR_W}}  "
                f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  "
-               f"{'SNR':>5} {'RSSI':>6}  {'batt':>5}")
+               f"{'':>5} {'trend':>8} {'SNR':>6} {'RSSI':>6}  {'batt':>5}")
 
         lines = [h1, sep, hdr, sep]
 
@@ -1732,8 +1736,21 @@ def show_inflow_view(iface):
                 dist_str = "—"
             dim   = "\033[2m" if ago_s >= 300 else ""
             spark = SPARKS[min(int(d["src_count"] / max_src * 8), 7)] if d["src_count"] > 0 else " "
-            lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {spark}  {d['src_count']:>4}  {d['total']:>5}  {bar}  {types}  "
-                         f"{sig_dots}{dim} {snr_str}dB {rssi_str}dBm  {batt_display}")
+            hist  = d.get("snr_history", [])
+            if len(hist) < 2:
+                snr_spark = "\033[90m" + "·" * 8 + "\033[0m"
+            else:
+                lo, hi  = min(hist), max(hist)
+                spread  = hi - lo
+                if spread == 0:
+                    chars = "▄" * len(hist) + "·" * (8 - len(hist))
+                else:
+                    chars = "".join(SPARKS[min(int((v - lo) / spread * 8), 7)] for v in hist)
+                    chars = chars.ljust(8, "·")
+                col = "\033[32m" if spread < 3 else "\033[33m" if spread < 7 else "\033[31m"
+                snr_spark = f"{col}{chars}\033[0m"
+            lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {spark}{d['src_count']:>3}  {d['total']:>5}  {bar}  {types}  "
+                         f"{sig_dots}{dim} {snr_spark} {snr_str}dB {rssi_str}dBm  {batt_display}")
             if _expanded[0] and d["sources"]:
                 sorted_srcs = sorted(d["sources"].items(), key=lambda x: x[1], reverse=True)
                 MAX_SHOWN = 8

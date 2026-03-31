@@ -129,21 +129,21 @@ Live session dashboard showing which relay nodes forwarded packets to your radio
 
 ```
   Inflow View  —  58 packets from 3 nodes  (session 6m 14s)
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Last Hop                Hops Out    Dist    last  Pkts   src  ████████████████████  txt pos usr tel  nb  tr    SNR   RSSI   batt
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Morpheus                     dir   1.2km      5s    38     4  ████████████████████    9  14   3   8   2   2  ●●●● -3.5dB  -82dBm    pwr
-  IAH Solar Reiheim             4h      —    1m20s    15     2  ███████░░░░░░░░░░░░░░    0   6   1   5   3   0  ○○○○    —dB    —dBm   74%
-  Unknown !..3a                  —      —      43s     5     1  ██░░░░░░░░░░░░░░░░░░░    1   2   0   2   0   0  ●○○○ -9.0dB  -95dBm     —
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Last Hop                Hops Out    Dist    last  src   Pkts                            txt pos usr tel  nb  tr        trend    SNR   RSSI   batt
+  ──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Morpheus                     dir   1.2km      5s  ▆ 4    38  ████████████████████    9  14   3   8   2   2  ●●●● ▄▄▅▄▃▄▄▅ -3.5dB  -82dBm    pwr
+  IAH Solar Reiheim             4h      —    1m20s  ▂ 2    15  ███████░░░░░░░░░░░░░░    0   6   1   5   3   0  ○○○○ ········    —dB    —dBm   74%
+  Unknown !..3a                  —      —      43s  ▁ 1     5  ██░░░░░░░░░░░░░░░░░░░    1   2   0   2   0   0  ●○○○ ▂▅▁▄▇▂▄·  -9.0dB  -95dBm     —
 ```
 
 Press `e` to expand the source node list beneath each relay row:
 
 ```
-  Morpheus                     dir   1.2km      5s    38     4  ████████████████████  ...  pwr
-    ↳ Alice · Bob · Charlie · Dave
-  IAH Solar Reiheim             4h      —    1m20s    15     2  ███████░░░░░░░░░░░░░░  ...   74%
-    ↳ Eve · Frank
+  Morpheus                     dir   1.2km      5s  ▆ 4    38  ████████████████████  ...  pwr
+    ◀ from:  Alice(14) · Bob(12) · Charlie(8) · Dave(4)
+  IAH Solar Reiheim             4h      —    1m20s  ▂ 2    15  ███████░░░░░░░░░░░░░░  ...  74%
+    ◀ from:  Eve(10) · Frank(5)
 ```
 
 Press `e` again to collapse. Rows silent for more than 5 minutes are dimmed.
@@ -155,11 +155,12 @@ Press `e` again to collapse. Rows silent for more than 5 minutes are dimmed.
 | Hops Out | `dir` = direct link · `Nh` = N hops away in routing table · `—` = unknown |
 | Dist | GPS-derived great-circle distance to the relay node (requires position data for both nodes) |
 | last | Time since the most recent packet from this relay |
+| src | Spark char (scaled to session max) + unique source node count for this relay |
 | Pkts | Total packets relayed by this node this session |
-| src | Number of unique source nodes whose packets arrived via this relay |
 | Bar | Relative packet volume |
 | txt pos usr tel nb tr | Per-type packet counts (text · position · nodeinfo · telemetry · neighborinfo · traceroute) |
 | Signal dots | `●●●●` green > 5 dB · `●●●○` bright green 0–5 dB · `●●○○` yellow −10–0 dB · `●○○○` red < −10 dB · `○○○○` no data |
+| trend | SNR sparkline of the last 8 packets — green (spread < 3 dB, stable) · yellow (3–7 dB) · red (> 7 dB, unstable) · `········` = fewer than 2 readings |
 | SNR / RSSI | Average signal quality of the last-hop link (only packets with signal data counted) |
 | batt | Battery level of the relay node — `pwr` (green) = on external power · `N%` green/yellow/red by charge level · `—` = no data |
 
