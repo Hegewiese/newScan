@@ -122,6 +122,80 @@ Nodes can be added to the favorites list independently of what the radio has mar
 | `e` | Export node config to JSON |
 | Enter | Quit (asks for confirmation) |
 
+### Inflow View (`i`)
+
+Live session dashboard showing which relay nodes forwarded packets to your radio, grouped by the last-hop relayer (`relayNode` field). Refreshes every second.
+
+```
+  Inflow View  —  58 packets from 3 nodes  (session 6m 14s)
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Via                     Hops    Dist  Pkts  ████████████████████  txt pos usr tel   nb  tr    SNR   RSSI    last
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Morpheus                 dir   1.2km    38  ████████████████████    9  14   3   8    2   2   -3.5dB  -82dBm     5s
+  IAH Solar Reiheim         4h      —     15  ███████░░░░░░░░░░░░░░    0   6   1   5    3   0      —      —    1m20s
+  Unknown !..3a             —      —      5  ██░░░░░░░░░░░░░░░░░░░    1   2   0   2    0   0   -9.0dB  -95dBm    43s
+```
+
+**Columns:**
+| Column | Meaning |
+|---|---|
+| Via | Node whose radio your device physically heard (last-hop relayer) |
+| Hops | `dir` = direct link · `Nh` = N hops away in routing table · `—` = unknown |
+| Dist | GPS-derived great-circle distance to the relay node (requires position data for both nodes) |
+| Pkts | Total packets relayed by this node this session |
+| Bar | Relative packet volume |
+| txt pos usr tel nb tr | Per-type packet counts (text · position · nodeinfo · telemetry · neighborinfo · traceroute) |
+| SNR / RSSI | Average signal quality of the last-hop link (only packets with signal data counted) |
+| last | Time since the most recent packet from this relay |
+
+> **Via vs. routing:** A node appearing here means your radio can hear it directly over the air. This does not imply you can reach it directly for outbound messages — the `Hops` column from the routing table governs that.
+
+### Outbound View (opens automatically after `m<n>`)
+
+Shown immediately after sending a DM. Updates every second until Enter is pressed.
+
+**With a known traced route:**
+```
+  Outbound: DM to Alice #0a3f2b11  |  t+4.7s
+  ════════════════════════════════════════════════════════════════════════════
+
+  ► Sent   "Hey, are you there?"  →  Alice
+    Route (35s ago):  [YOU] → [Morpheus](+2.5dB) → [Alice]
+
+  ─── Relay echoes (re-broadcasts of our packet we could hear) ─────────────────
+  Node                    SNR   RSSI  hops      at
+  ────────────────────────────────────────────────────────────────────────────
+  Morpheus               +2.5    -78     1    0.3s
+
+  ─── ACK return path ────────────────────────────────────────────────────────
+  t+3.92s  ✓ ACK from Alice  via Morpheus  SNR +1.0dB  RSSI -79dBm  2 hops
+  [Alice] ──[Morpheus]── [YOU]
+  → Next-hop learned: Morpheus will relay future DMs to Alice
+
+  Press Enter to return
+```
+
+**With a direct link:**
+```
+  Outbound: DM to Morpheus #0b1c2d3e  |  t+2.1s
+  ════════════════════════════════════════════════════════════════════════════
+
+  ► Sent   "Are you on channel 2?"  →  Morpheus
+    [YOU] ────────────────────── [Morpheus]  (direct link)
+
+  ─── Relay echoes (re-broadcasts of our packet we could hear) ─────────────────
+  (none observed — direct link, no relay expected)
+
+  ─── ACK return path ────────────────────────────────────────────────────────
+  t+1.84s  ✓ ACK from Morpheus  (direct)  SNR -4.5dB  RSSI -81dBm  0 hops
+  [Morpheus] ───────────────── [YOU]  (direct)
+  → Direct link confirmed — no relay needed
+
+  Press Enter to return
+```
+
+**Relay echoes** are re-broadcasts of your own packet that your radio overhears. They only appear if the relaying node is within direct RF range of you. If the destination is multiple hops away the relay nodes are usually too far to hear directly.
+
 ---
 
 ## Logging
