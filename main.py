@@ -1122,8 +1122,8 @@ def send_repeated(iface, node_id, name):
 TRACEROUTE_TIMEOUT = 30  # seconds
 _LB  = "\033[94m"   # light blue — used for traceroute terminal output
 _RST = "\033[0m"
-_RX  = "\033[97m"   # bright white  — incoming packets (lighter)
-_TX  = "\033[2m"    # dim           — outgoing packets (darker)
+_RX  = "\033[37m"   # white          — incoming packets
+_TX  = "\033[90m"   # dark gray      — outgoing packets
 PING_TIMEOUT       = 10  # seconds
 _UNK_SNR = -128  # meshtastic sentinel for unknown SNR
 
@@ -2099,6 +2099,19 @@ def _ensure_disconnected(address):
         log.info(f"Disconnected {address}")
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log.warning(f"Could not disconnect {address}: {e}")
+    # os._exit() in the previous session skips bleak's D-Bus cleanup, leaving
+    # stale GATT notify registrations in BlueZ.  Power-cycling the adapter
+    # is the only reliable way to flush that state.
+    log.info("Power-cycling Bluetooth adapter to clear stale GATT notify state")
+    print("  Power-cycling adapter to clear stale GATT state...")
+    try:
+        subprocess.run(["bluetoothctl", "power", "off"], capture_output=True, text=True, timeout=5)
+        time.sleep(0.5)
+        subprocess.run(["bluetoothctl", "power", "on"],  capture_output=True, text=True, timeout=5)
+        time.sleep(2)  # give BlueZ time to re-initialise before we connect
+        log.info("Bluetooth adapter power-cycled")
+    except (FileNotFoundError, subprocess.TimeoutExpired) as e:
+        log.warning(f"Could not power-cycle adapter: {e}")
 
 
 def main():
