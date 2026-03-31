@@ -614,13 +614,14 @@ def start_message_log(iface) -> None:
                         "text": 0, "position": 0, "user": 0,
                         "telemetry": 0, "neighborinfo": 0, "traceroute": 0,
                         "snr_sum": 0.0, "rssi_sum": 0, "sig_count": 0,
-                        "sources": set(),
+                        "sources": {},
                         "last_ts": time.time(),
                     }
                 d = _inflow_data[key]
                 d["total"]   += 1
                 d[pkt_type]  += 1
-                d["sources"].add(packet["from"])
+                src = packet["from"]
+                d["sources"][src] = d["sources"].get(src, 0) + 1
                 d["last_ts"]  = time.time()
                 if snr is not None:
                     d["snr_sum"]   += snr
@@ -1666,7 +1667,7 @@ def show_inflow_view(iface):
 
     def _render():
         with _inflow_lock:
-            snap = {k: {**v, "src_count": len(v["sources"]), "sources": frozenset(v["sources"])} for k, v in _inflow_data.items()}
+            snap = {k: {**v, "src_count": len(v["sources"]), "sources": dict(v["sources"])} for k, v in _inflow_data.items()}
         rows_data  = sorted(snap.items(), key=lambda x: x[1]["total"], reverse=True)
         total_pkts = sum(v["total"] for v in snap.values())
         elapsed    = int(time.time() - _inflow_start_ts)
@@ -1731,8 +1732,18 @@ def show_inflow_view(iface):
             lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {d['total']:>5}  {d['src_count']:>4}  {bar}  {types}  "
                          f"{sig_dots}{dim} {snr_str}dB {rssi_str}dBm  {batt_display}")
             if _expanded[0] and d["sources"]:
-                src_names = sorted(_rx_resolve(iface, num) for num in d["sources"])
-                lines.append(f"\033[2m    ↳ {' · '.join(src_names)}\033[0m")
+                sorted_srcs = sorted(d["sources"].items(), key=lambda x: x[1], reverse=True)
+                MAX_SHOWN = 8
+                parts = []
+                for num, cnt in sorted_srcs[:MAX_SHOWN]:
+                    name = _rx_resolve(iface, num)
+                    if len(name) > 12:
+                        name = name[:12] + ".."
+                    parts.append(f"{name}({cnt})")
+                rest = len(sorted_srcs) - MAX_SHOWN
+                if rest > 0:
+                    parts.append(f"...+{rest}")
+                lines.append(f"\033[2m    ↳ {' · '.join(parts)}\033[0m")
 
         if not rows_data:
             lines.append("  (no packets received yet — waiting...)")
