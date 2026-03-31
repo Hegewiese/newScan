@@ -1749,7 +1749,7 @@ def show_inflow_view(iface):
                     chars = chars.ljust(8, "·")
                 col = "\033[32m" if spread < 3 else "\033[33m" if spread < 7 else "\033[31m"
                 snr_spark = f"{col}{chars}\033[0m"
-            lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {spark}{d['src_count']:>3}  {d['total']:>5}  {bar}  {types}  "
+            lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {d['src_count']:>2} {spark}  {d['total']:>5}  {bar}  {types}  "
                          f"{sig_dots}{dim} {snr_spark} {snr_str}dB {rssi_str}dBm  {batt_display}")
             if _expanded[0] and d["sources"]:
                 sorted_srcs = sorted(d["sources"].items(), key=lambda x: x[1], reverse=True)
