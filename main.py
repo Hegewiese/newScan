@@ -41,9 +41,134 @@ if sys.prefix == sys.base_prefix:
     if os.path.isfile(_venv_python):
         print("Not running in a virtual environment.")
         print("  Included venv found: meshtastic_venv/")
-        _ans = input("  Activate meshtastic_venv and restart? [Y/n]: ").strip().lower()
+        _VENV_TIMEOUT = 5
+        _stop_venv_cd = threading.Event()
+
+        def _venv_countdown():
+            for secs in range(_VENV_TIMEOUT, 0, -1):
+                if _stop_venv_cd.is_set():
+                    return
+                sys.stdout.write(f"\r  Activate meshtastic_venv and restart? [Y/n]:  (auto-yes in {secs}s) ")
+                sys.stdout.flush()
+                _stop_venv_cd.wait(1)
+
+        sys.stdout.write(f"  Activate meshtastic_venv and restart? [Y/n]:  (auto-yes in {_VENV_TIMEOUT}s) ")
+        sys.stdout.flush()
+
+        _venv_cd_thread = threading.Thread(target=_venv_countdown, daemon=True)
+        _venv_cd_thread.start()
+
+        _venv_ready = select.select([sys.stdin], [], [], _VENV_TIMEOUT)[0]
+        _stop_venv_cd.set()
+        _venv_cd_thread.join(timeout=1)
+
+        if _venv_ready:
+            _ans = sys.stdin.readline().strip().lower()
+        else:
+            print()
+            _ans = ""
+
         if _ans != "n":
             os.execv(_venv_python, [_venv_python] + sys.argv)
+
+# ---------------------------------------------------------------------------
+# Auto-update check via git
+# ---------------------------------------------------------------------------
+_REPO_DIR = os.path.dirname(os.path.abspath(__file__))
+_git_exe = shutil.which("git")
+if _git_exe and not os.environ.get("_NEWSCAN_UPDATED"):
+    # Minimal log handler — the main logging setup runs after imports below.
+    _upd_log = logging.getLogger("newscan.update")
+    _upd_log.setLevel(logging.DEBUG)
+    _upd_log.propagate = False
+    _upd_fh = logging.FileHandler(os.path.join(_REPO_DIR, "newscan.log"))
+    _upd_fh.setFormatter(logging.Formatter(
+        "%(asctime)s  %(levelname)-8s  %(message)s", datefmt="%Y-%m-%d %H:%M:%S"
+    ))
+    _upd_log.addHandler(_upd_fh)
+
+    try:
+        subprocess.run(
+            [_git_exe, "-C", _REPO_DIR, "fetch", "--quiet"],
+            timeout=5,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        _local_rev  = subprocess.check_output(
+            [_git_exe, "-C", _REPO_DIR, "rev-parse", "HEAD"], text=True
+        ).strip()
+        _remote_rev = subprocess.check_output(
+            [_git_exe, "-C", _REPO_DIR, "rev-parse", "origin/main"], text=True
+        ).strip()
+        if _local_rev != _remote_rev:
+            _upd_log.info(
+                f"Update available — local: {_local_rev[:8]}  remote: {_remote_rev[:8]}"
+            )
+            _UPDATE_TIMEOUT = 5
+            _stop_upd_cd = threading.Event()
+
+            def _update_countdown():
+                for _secs in range(_UPDATE_TIMEOUT, 0, -1):
+                    if _stop_upd_cd.is_set():
+                        return
+                    sys.stdout.write(
+                        f"\r  Pull latest from GitHub? [Y/n]:  (auto-yes in {_secs}s) "
+                    )
+                    sys.stdout.flush()
+                    _stop_upd_cd.wait(1)
+
+            print("Update available: a newer version exists on GitHub.")
+            sys.stdout.write(
+                f"  Pull latest from GitHub? [Y/n]:  (auto-yes in {_UPDATE_TIMEOUT}s) "
+            )
+            sys.stdout.flush()
+
+            _upd_cd_thread = threading.Thread(target=_update_countdown, daemon=True)
+            _upd_cd_thread.start()
+
+            _upd_ready = select.select([sys.stdin], [], [], _UPDATE_TIMEOUT)[0]
+            _stop_upd_cd.set()
+            _upd_cd_thread.join(timeout=1)
+            print()
+
+            if _upd_ready:
+                _upd_ans = sys.stdin.readline().strip().lower()
+            else:
+                _upd_ans = ""
+
+            if _upd_ans == "n":
+                _upd_log.info("Update declined by user — continuing with current version.")
+            else:
+                _upd_log.info("Pulling update from origin/main ...")
+                _pull = subprocess.run(
+                    [_git_exe, "-C", _REPO_DIR, "pull", "--ff-only"],
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+                if _pull.returncode == 0:
+                    _new_rev = subprocess.check_output(
+                        [_git_exe, "-C", _REPO_DIR, "rev-parse", "HEAD"], text=True
+                    ).strip()
+                    if _new_rev != _local_rev:
+                        _upd_log.info(f"Update successful — now at {_new_rev[:8]}. Restarting.")
+                        print("  Updated successfully. Restarting...")
+                        os.environ["_NEWSCAN_UPDATED"] = "1"
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
+                    else:
+                        _upd_log.warning("Pull returned 0 but HEAD unchanged — skipping restart.")
+                        print("  Update did not advance HEAD (local changes may conflict).")
+                else:
+                    _upd_log.warning(
+                        f"git pull failed (rc={_pull.returncode}): {_pull.stderr.strip()}"
+                    )
+                    print(f"  git pull failed — continuing with current version.")
+                    print(f"  ({_pull.stderr.strip()})")
+    except Exception as _upd_exc:
+        _upd_log.warning(f"Auto-update check failed: {_upd_exc}")
+    finally:
+        _upd_fh.close()
+        _upd_log.removeHandler(_upd_fh)
 
 try:
     import meshtastic.ble_interface
@@ -391,12 +516,20 @@ def start_message_log(iface) -> None:
             # strip the "via " prefix to get just the relay node name
             relay_name = relay_raw[4:] if relay_raw.startswith("via ") else relay_raw
             key = relay_name if relay_name else "direct"
+            # resolve relay node number from relayNode byte for hopsAway lookup
+            relay_num = None
+            relay_byte = packet.get("relayNode")
+            if relay_byte:
+                for num in (getattr(interface, "nodesByNum", None) or {}):
+                    if isinstance(num, int) and (num & 0xFF) == relay_byte:
+                        relay_num = num
+                        break
             snr  = packet.get("rxSnr")
             rssi = packet.get("rxRssi")
             with _inflow_lock:
                 if key not in _inflow_data:
                     _inflow_data[key] = {
-                        "name": key, "total": 0,
+                        "name": key, "node_num": relay_num, "total": 0,
                         "text": 0, "position": 0, "user": 0,
                         "telemetry": 0, "neighborinfo": 0, "traceroute": 0,
                         "snr_sum": 0.0, "rssi_sum": 0, "sig_count": 0,
@@ -744,9 +877,51 @@ def _ago(ts):
     return f"{diff // 3600}h ago"
 
 
+def _haversine(lat1, lon1, lat2, lon2):
+    """Great-circle distance in km between two (lat, lon) points in decimal degrees."""
+    import math
+    R = 6371.0
+    φ1, φ2 = math.radians(lat1), math.radians(lat2)
+    dφ = math.radians(lat2 - lat1)
+    dλ = math.radians(lon2 - lon1)
+    a = math.sin(dφ / 2) ** 2 + math.cos(φ1) * math.cos(φ2) * math.sin(dλ / 2) ** 2
+    return R * 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+
+
+def _node_pos(node):
+    """Return (lat, lon) in decimal degrees from a nodesByNum entry, or None."""
+    pos = (node or {}).get("position", {})
+    if "latitudeI" in pos and "longitudeI" in pos:
+        return pos["latitudeI"] / 1e7, pos["longitudeI"] / 1e7
+    return None
+
+
 def _peer_name(peer):
     user = peer.get("user", {})
     return user.get("longName") or user.get("shortName") or "Unknown"
+
+
+def _routing_tag(iface, node_id):
+    """Return '[next-hop: <name>]' or '[flooding]' based on the firmware's
+    learned next-hop for node_id, read from nodesByNum before sending."""
+    dest_num = None
+    if isinstance(node_id, int):
+        dest_num = node_id
+    elif isinstance(node_id, str) and node_id.startswith("!"):
+        try:
+            dest_num = int(node_id[1:], 16)
+        except ValueError:
+            pass
+    if dest_num is not None:
+        dest_node = (getattr(iface, "nodesByNum", None) or {}).get(dest_num, {})
+        nh = dest_node.get("nextHop")
+        if nh:
+            nh_node = (getattr(iface, "nodesByNum", None) or {}).get(nh, {})
+            nh_name = (nh_node.get("user", {}).get("longName")
+                       or nh_node.get("user", {}).get("shortName")
+                       or f"!{nh:08x}")
+            return f"[next-hop: {nh_name}]"
+    return "[flooding]"
 
 
 def send_message(iface, node_id, name):
@@ -777,21 +952,13 @@ def send_message(iface, node_id, name):
         ack_event.set()
 
     try:
+        rtag = _routing_tag(iface, node_id)
         sent_pkt = iface.sendText(
             f"[{time.strftime('%H:%M:%S')}] {text}",
             destinationId=node_id, wantAck=True, onResponse=_on_ack,
         )
         pkt_id = sent_pkt.get("id") if isinstance(sent_pkt, dict) else None
-        nh = sent_pkt.get("nextHop") if isinstance(sent_pkt, dict) else None
-        if nh:
-            nh_node = (getattr(iface, "nodesByNum", None) or {}).get(nh, {})
-            nh_name = (nh_node.get("user", {}).get("longName")
-                       or nh_node.get("user", {}).get("shortName")
-                       or f"!{nh:08x}")
-            routing_tag = f"[next-hop: {nh_name}]"
-        else:
-            routing_tag = "[flooding]"
-        log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Message sent to {name} ({node_id}): {text!r}  💬  {routing_tag}{_RST}")
+        log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Message sent to {name} ({node_id}): {text!r}  💬  {rtag}{_RST}")
     except Exception as e:
         log.exception(f"send_message to {name} ({node_id}) failed: {e}")
         print(f"  Failed: {e}")
@@ -831,16 +998,8 @@ def send_repeated(iface, node_id, name):
                     print(f"\n  NAK #{_c} from {name}: {error}", flush=True)
 
             try:
-                _spkt = iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
-                _nh = _spkt.get("nextHop") if isinstance(_spkt, dict) else None
-                if _nh:
-                    _nh_node = (getattr(iface, "nodesByNum", None) or {}).get(_nh, {})
-                    _nh_name = (_nh_node.get("user", {}).get("longName")
-                                or _nh_node.get("user", {}).get("shortName")
-                                or f"!{_nh:08x}")
-                    _rtag = f"[next-hop: {_nh_name}]"
-                else:
-                    _rtag = "[flooding]"
+                _rtag = _routing_tag(iface, node_id)
+                iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
                 log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Repeated message #{current} sent to {name} ({node_id})  💬  {_rtag}{_RST}")
                 print(f"\r  Sent #{current} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
@@ -1410,13 +1569,16 @@ def show_inflow_view(iface):
         h1  = (f"  Inflow View  —  {total_pkts} packet{'s' if total_pkts != 1 else ''} "
                f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
                f"(session {elapsed_str})")
-        sep = "  " + "─" * 86
-        hdr = (f"  {'Via':<22}  {'Pkts':>5}  {'':<{BAR_W}}  "
+        sep = "  " + "─" * 100
+        hdr = (f"  {'Via':<22}  {'Hops':>4}  {'Dist':>6}  {'Pkts':>5}  {'':<{BAR_W}}  "
                f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  "
                f"{'SNR':>5} {'RSSI':>6}  {'last':>6}")
 
         lines = [h1, sep, hdr, sep]
 
+        nodes_by_num = getattr(iface, "nodesByNum", None) or {}
+        my_num       = iface.myInfo.my_node_num
+        my_pos       = _node_pos(nodes_by_num.get(my_num))
         for node_id, d in rows_data:
             bar_fill = int(d["total"] / max_total * BAR_W)
             bar      = "\u2588" * bar_fill + "\u2591" * (BAR_W - bar_fill)
@@ -1428,7 +1590,16 @@ def show_inflow_view(iface):
             sc = d["sig_count"]
             snr_str  = f"{d['snr_sum']  / sc:>4.1f}" if sc else "   —"
             rssi_str = f"{d['rssi_sum'] // sc:>4}"   if sc else "   —"
-            lines.append(f"  {name}  {d['total']:>5}  {bar}  {types}  "
+            relay_num = d.get("node_num")
+            hops = nodes_by_num.get(relay_num, {}).get("hopsAway") if relay_num else None
+            hops_str = "dir" if hops == 0 else f"{hops}h" if hops is not None else "—"
+            relay_pos = _node_pos(nodes_by_num.get(relay_num)) if relay_num else None
+            if my_pos and relay_pos:
+                km = _haversine(*my_pos, *relay_pos)
+                dist_str = f"{km:.0f}km" if km >= 1 else f"{km*1000:.0f}m"
+            else:
+                dist_str = "—"
+            lines.append(f"  {name}  {hops_str:>4}  {dist_str:>6}  {d['total']:>5}  {bar}  {types}  "
                          f"{snr_str}dB {rssi_str}dBm  {ago_str:>6}")
 
         if not rows_data:
