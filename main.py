@@ -752,7 +752,16 @@ def send_message(iface, node_id, name):
             destinationId=node_id, wantAck=True, onResponse=_on_ack,
         )
         pkt_id = sent_pkt.get("id") if isinstance(sent_pkt, dict) else None
-        log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Message sent to {name} ({node_id}): {text!r}  💬{_RST}")
+        nh = sent_pkt.get("nextHop") if isinstance(sent_pkt, dict) else None
+        if nh:
+            nh_node = (getattr(iface, "nodesByNum", None) or {}).get(nh, {})
+            nh_name = (nh_node.get("user", {}).get("longName")
+                       or nh_node.get("user", {}).get("shortName")
+                       or f"!{nh:08x}")
+            routing_tag = f"[next-hop: {nh_name}]"
+        else:
+            routing_tag = "[flooding]"
+        log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Message sent to {name} ({node_id}): {text!r}  💬  {routing_tag}{_RST}")
     except Exception as e:
         log.exception(f"send_message to {name} ({node_id}) failed: {e}")
         print(f"  Failed: {e}")
@@ -792,8 +801,17 @@ def send_repeated(iface, node_id, name):
                     print(f"\n  NAK #{_c} from {name}: {error}", flush=True)
 
             try:
-                iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
-                log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Repeated message #{current} sent to {name} ({node_id})  💬{_RST}")
+                _spkt = iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
+                _nh = _spkt.get("nextHop") if isinstance(_spkt, dict) else None
+                if _nh:
+                    _nh_node = (getattr(iface, "nodesByNum", None) or {}).get(_nh, {})
+                    _nh_name = (_nh_node.get("user", {}).get("longName")
+                                or _nh_node.get("user", {}).get("shortName")
+                                or f"!{_nh:08x}")
+                    _rtag = f"[next-hop: {_nh_name}]"
+                else:
+                    _rtag = "[flooding]"
+                log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Repeated message #{current} sent to {name} ({node_id})  💬  {_rtag}{_RST}")
                 print(f"\r  Sent #{current} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
                 log.exception(f"Repeated message #{current} to {name} ({node_id}) failed: {e}")
