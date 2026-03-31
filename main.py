@@ -255,63 +255,55 @@ def start_message_log(iface) -> None:
             via        = f"  {relay}" if relay else ""
             ch         = _ch_label(interface, packet.get("channel", 0))
             text       = packet.get("decoded", {}).get("text", "")
-            icon       = "\033[31m✉\033[0m" if to_num != BROADCAST else "✉"
-            log.info(f"{icon} {ch}  {sender}{via} -> {dest}: {text!r}{_rx_sig(packet)}")
+            icon       = "💬"
+            log.info(f"{_RX}◀◀ {icon} {ch}  {sender}{via} -> {dest}: {text!r}{_rx_sig(packet)}{_RST}")
         except Exception as e:
             log.warning(f"RX text log error: {e}")
 
     # ── position ───────────────────────────────────────────────────────────
     def _on_position(packet, interface):
         try:
-            if packet.get("from") == my_num:
-                return
-            nodes  = interface.nodes or {}
-            sender = _rx_resolve(interface,packet.get("from"))
-            relay  = _rx_relay(interface, packet)
-            via    = f"  {relay}" if relay else ""
-            ch     = _ch_label(interface, packet.get("channel", 0))
-            pos    = packet.get("decoded", {}).get("position", {})
-            parts  = []
+            ch  = _ch_label(interface, packet.get("channel", 0))
+            pos = packet.get("decoded", {}).get("position", {})
+            parts = []
             if "latitudeI"  in pos: parts.append(f"lat={pos['latitudeI']/1e7:.5f}")
             if "longitudeI" in pos: parts.append(f"lon={pos['longitudeI']/1e7:.5f}")
             if pos.get("altitude"):  parts.append(f"alt={pos['altitude']}m")
             if pos.get("satsInView"):parts.append(f"sats={pos['satsInView']}")
             detail = "  ".join(parts) if parts else "no fix"
-            log.info(f"⊕ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}")
+            if packet.get("from") == my_num:
+                log.info(f"{_TX}▶▶ ⊕ {ch}  {_rx_resolve(interface, my_num)}: {detail}{_RST}")
+                return
+            sender = _rx_resolve(interface, packet.get("from"))
+            via    = f"  {_rx_relay(interface, packet)}" if _rx_relay(interface, packet) else ""
+            log.info(f"{_RX}◀◀ ⊕ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}{_RST}")
         except Exception as e:
             log.warning(f"RX position log error: {e}")
 
     # ── node info ──────────────────────────────────────────────────────────
     def _on_user(packet, interface):
         try:
-            if packet.get("from") == my_num:
-                return
-            nodes  = interface.nodes or {}
-            sender = _rx_resolve(interface,packet.get("from"))
-            relay  = _rx_relay(interface, packet)
-            via    = f"  {relay}" if relay else ""
-            ch     = _ch_label(interface, packet.get("channel", 0))
-            u      = packet.get("decoded", {}).get("user", {})
+            ch = _ch_label(interface, packet.get("channel", 0))
+            u  = packet.get("decoded", {}).get("user", {})
             detail = (f"long={u.get('longName')}  short={u.get('shortName')}  "
                       f"hw={u.get('hwModel')}  role={u.get('role')}")
-            log.info(f"◉ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}")
+            if packet.get("from") == my_num:
+                log.info(f"{_TX}▶▶ ◉ {ch}  {_rx_resolve(interface, my_num)}: {detail}{_RST}")
+                return
+            sender = _rx_resolve(interface, packet.get("from"))
+            via    = f"  {_rx_relay(interface, packet)}" if _rx_relay(interface, packet) else ""
+            log.info(f"{_RX}◀◀ ◉ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}{_RST}")
         except Exception as e:
             log.warning(f"RX nodeinfo log error: {e}")
 
     # ── telemetry ──────────────────────────────────────────────────────────
     def _on_telemetry(packet, interface):
         try:
-            if packet.get("from") == my_num:
-                return
-            nodes  = interface.nodes or {}
-            sender = _rx_resolve(interface,packet.get("from"))
-            relay  = _rx_relay(interface, packet)
-            via    = f"  {relay}" if relay else ""
-            ch     = _ch_label(interface, packet.get("channel", 0))
-            t      = packet.get("decoded", {}).get("telemetry", {})
-            dm     = t.get("deviceMetrics", {})
-            em     = t.get("environmentMetrics", {})
-            parts  = []
+            ch = _ch_label(interface, packet.get("channel", 0))
+            t  = packet.get("decoded", {}).get("telemetry", {})
+            dm = t.get("deviceMetrics", {})
+            em = t.get("environmentMetrics", {})
+            parts = []
             if dm:
                 if dm.get("batteryLevel")       is not None: parts.append(f"bat={dm['batteryLevel']}%")
                 if dm.get("voltage")            is not None: parts.append(f"volt={dm['voltage']:.2f}V")
@@ -324,25 +316,29 @@ def start_message_log(iface) -> None:
                 if em.get("barometricPressure") is not None: parts.append(f"pres={em['barometricPressure']:.1f}hPa")
             icon   = "⊡" if dm else "⊛"
             detail = "  ".join(parts) if parts else "—"
-            log.info(f"{icon} {ch}  {sender}{via}: {detail}{_rx_sig(packet)}")
+            if packet.get("from") == my_num:
+                log.info(f"{_TX}▶▶ {icon} {ch}  {_rx_resolve(interface, my_num)}: {detail}{_RST}")
+                return
+            sender = _rx_resolve(interface, packet.get("from"))
+            via    = f"  {_rx_relay(interface, packet)}" if _rx_relay(interface, packet) else ""
+            log.info(f"{_RX}◀◀ {icon} {ch}  {sender}{via}: {detail}{_rx_sig(packet)}{_RST}")
         except Exception as e:
             log.warning(f"RX telemetry log error: {e}")
 
     # ── neighbor info ──────────────────────────────────────────────────────
     def _on_neighborinfo(packet, interface):
         try:
-            if packet.get("from") == my_num:
-                return
-            nodes     = interface.nodes or {}
-            sender    = _rx_resolve(interface,packet.get("from"))
-            relay     = _rx_relay(interface, packet)
-            via       = f"  {relay}" if relay else ""
             ch        = _ch_label(interface, packet.get("channel", 0))
             ni        = packet.get("decoded", {}).get("neighborinfo", {})
             neighbors = ni.get("neighbors", [])
-            nb_names  = [_rx_resolve(interface,nb.get("nodeId")) for nb in neighbors[:6]]
+            nb_names  = [_rx_resolve(interface, nb.get("nodeId")) for nb in neighbors[:6]]
             detail    = f"{len(neighbors)} neighbors: {', '.join(nb_names)}" if nb_names else "0 neighbors"
-            log.info(f"⬡ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}")
+            if packet.get("from") == my_num:
+                log.info(f"{_TX}▶▶ ⬡ {ch}  {_rx_resolve(interface, my_num)}: {detail}{_RST}")
+                return
+            sender = _rx_resolve(interface, packet.get("from"))
+            via    = f"  {_rx_relay(interface, packet)}" if _rx_relay(interface, packet) else ""
+            log.info(f"{_RX}◀◀ ⬡ {ch}  {sender}{via}: {detail}{_rx_sig(packet)}{_RST}")
         except Exception as e:
             log.warning(f"RX neighborinfo log error: {e}")
 
@@ -358,7 +354,7 @@ def start_message_log(iface) -> None:
             relay  = _rx_relay(interface, packet)
             via    = f"  {relay}" if relay else ""
             ch     = _ch_label(interface, packet.get("channel", 0))
-            log.info(f"⇌ {ch}  {sender}{via} -> {dest}{_rx_sig(packet)}")
+            log.info(f"{_RX}◀◀ ⇌ {ch}  {sender}{via} -> {dest}{_rx_sig(packet)}{_RST}")
         except Exception as e:
             log.warning(f"RX traceroute log error: {e}")
 
@@ -745,9 +741,9 @@ def send_message(iface, node_id, name):
         ack_result["elapsed"] = time.time() - send_time
         ack_result["error"]   = error
         if error == "NONE":
-            log.info(f"ACK received from {name} ({node_id})")
+            log.info(f"{_RX}◀◀ ACK received from {name} ({node_id}){_RST}")
         else:
-            log.warning(f"NAK from {name} ({node_id}): {error}")
+            log.warning(f"{_RX}◀◀ NAK from {name} ({node_id}): {error}{_RST}")
         ack_event.set()
 
     try:
@@ -756,7 +752,7 @@ def send_message(iface, node_id, name):
             destinationId=node_id, wantAck=True, onResponse=_on_ack,
         )
         pkt_id = sent_pkt.get("id") if isinstance(sent_pkt, dict) else None
-        log.info(f"{_ch_label(iface, 0)}  Message sent to {name} ({node_id}): {text!r}  \033[31m✉\033[0m")
+        log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Message sent to {name} ({node_id}): {text!r}  💬{_RST}")
     except Exception as e:
         log.exception(f"send_message to {name} ({node_id}) failed: {e}")
         print(f"  Failed: {e}")
@@ -789,15 +785,15 @@ def send_repeated(iface, node_id, name):
                 routing = packet.get("decoded", {}).get("routing", {})
                 error = routing.get("errorReason", "NONE")
                 if error == "NONE":
-                    log.info(f"ACK received for repeated message #{_c} from {name} ({node_id})")
+                    log.info(f"{_RX}◀◀ ACK received for repeated message #{_c} from {name} ({node_id}){_RST}")
                     print(f"\n  ACK #{_c} from {name}.", flush=True)
                 else:
-                    log.warning(f"NAK for repeated message #{_c} from {name} ({node_id}): {error}")
+                    log.warning(f"{_RX}◀◀ NAK for repeated message #{_c} from {name} ({node_id}): {error}{_RST}")
                     print(f"\n  NAK #{_c} from {name}: {error}", flush=True)
 
             try:
                 iface.sendText(f"[{time.strftime('%H:%M:%S')}] {text}", destinationId=node_id, wantAck=True, onResponse=onAckNak)
-                log.info(f"{_ch_label(iface, 0)}  Repeated message #{current} sent to {name} ({node_id})  \033[31m✉\033[0m")
+                log.info(f"{_TX}▶▶ {_ch_label(iface, 0)}  Repeated message #{current} sent to {name} ({node_id})  💬{_RST}")
                 print(f"\r  Sent #{current} to {name}. Press Enter to stop.", end="", flush=True)
             except Exception as e:
                 log.exception(f"Repeated message #{current} to {name} ({node_id}) failed: {e}")
@@ -816,6 +812,8 @@ def send_repeated(iface, node_id, name):
 TRACEROUTE_TIMEOUT = 30  # seconds
 _LB  = "\033[94m"   # light blue — used for traceroute terminal output
 _RST = "\033[0m"
+_RX  = "\033[97m"   # bright white  — incoming packets (lighter)
+_TX  = "\033[2m"    # dim           — outgoing packets (darker)
 PING_TIMEOUT       = 10  # seconds
 _UNK_SNR = -128  # meshtastic sentinel for unknown SNR
 
@@ -952,18 +950,25 @@ def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
 
 
 def tracer_node(iface, node_id, name):
-    """Send a single tracer to the given node and print the result."""
+    """Send a single traceroute to the given node and display the full path.
+
+    Prompts for a hop limit (1–7, default 3).  Runs the trace with a live
+    progress bar, then prints the towards and back routes with per-hop SNR.
+    Results are also written to the log and cached in _route_cache so the
+    outbound view can display the last known path for future messages to
+    this node.
+    """
     print(f"\n{_LB}  tracer to {name}{_RST}")
     hop_str = input("  Hop limit [3]: ").strip()
     hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
-    log.info(f"tracer to {name} ({node_id}), hop_limit={hop_limit}")
+    log.info(f"{_TX}▶▶ tracer to {name} ({node_id}), hop_limit={hop_limit}{_RST}")
     print()
     success, err = _tracer_with_bar(iface, node_id, hop_limit, name=name)
     if success:
-        log.info(f"tracer to {name} ({node_id}) completed successfully")
+        log.info(f"{_RX}◀◀ tracer to {name} ({node_id}) completed successfully{_RST}")
         print(f"{_LB}  Done.{_RST}")
     else:
-        log.error(f"tracer to {name} ({node_id}) failed: {err}")
+        log.error(f"{_RX}◀◀ tracer to {name} ({node_id}) failed: {err}{_RST}")
         print(f"{_LB}  Failed: {err}{_RST}")
 
 
@@ -987,9 +992,9 @@ def tracer_repeated(iface, node_id, name):
             success, err = _tracer_with_bar(iface, node_id, hop_limit, name=name)
             last_result["success"] = success
             if success:
-                log.info(f"Repeated tracer #{count} to {name} ({node_id}) completed")
+                log.info(f"{_RX}◀◀ Repeated tracer #{count} to {name} ({node_id}) completed{_RST}")
             else:
-                log.error(f"Repeated tracer #{count} to {name} ({node_id}) failed: {err}")
+                log.error(f"{_RX}◀◀ Repeated tracer #{count} to {name} ({node_id}) failed: {err}{_RST}")
                 print(f"{_LB}  Failed: {err}{_RST}")
             if not stop.is_set():
                 print(f"{_LB}  Next in {interval}s — press Enter to stop.{_RST}")
@@ -1029,7 +1034,7 @@ def ping_favorites(iface, favorites):
         def _on_response(packet, _nid=node_id, _nm=name):
             with lock:
                 responded[_nid] = True
-            log.info(f"⌁ ping response from {_nm} ({_nid})")
+            log.info(f"{_RX}◀◀ ⌁ ping response from {_nm} ({_nid}){_RST}")
 
         try:
             iface.sendData(
@@ -1040,7 +1045,7 @@ def ping_favorites(iface, favorites):
                 onResponse=_on_response,
             )
             print(f"  [{idx + 1}/{total}] NodeInfo request sent to {name}")
-            log.info(f"⌁ ping (nodeinfo request) sent to {name} ({node_id})")
+            log.info(f"{_TX}▶▶ ⌁ ping (nodeinfo request) sent to {name} ({node_id}){_RST}")
         except Exception as e:
             print(f"  [{idx + 1}/{total}] Failed to reach {name}: {e}")
             log.warning(f"⌁ ping to {name} ({node_id}) failed to send: {e}")
@@ -1118,6 +1123,10 @@ def show_outbound_view(iface, node_id, dest_name, pkt_id, message_text,
     known_hops = dest_node.get("hopsAway")
     known_snr  = dest_node.get("snr")
 
+    # hop-scaled ACK timeout: 15s base + 15s per hop, floor 45s
+    _hops_for_timeout = known_hops if known_hops is not None else 4
+    _ack_timeout = max(45, 15 + _hops_for_timeout * 15)
+
     # -- relay echo listener ------------------------------------------------
     def _on_echo(packet, interface=None, **kwargs):
         if _stop.is_set():
@@ -1168,9 +1177,9 @@ def show_outbound_view(iface, node_id, dest_name, pkt_id, message_text,
         ack_result["error"]   = error
         ack_event.set()
         if error == "NONE":
-            log.info(f"ACK from {dest_name} ({node_id}) [pubsub]")
+            log.info(f"{_RX}◀◀ ACK from {dest_name} ({node_id}) [pubsub]{_RST}")
         else:
-            log.warning(f"NAK from {dest_name} ({node_id}) [pubsub]: {error}")
+            log.warning(f"{_RX}◀◀ NAK from {dest_name} ({node_id}) [pubsub]: {error}{_RST}")
 
     _echo_topics = [
         "meshtastic.receive.text",
@@ -1219,7 +1228,7 @@ def show_outbound_view(iface, node_id, dest_name, pkt_id, message_text,
             hops_vis = " ── ? " * known_hops
             lines.append(f"    [YOU]{hops_vis}── [{dest_name}]"
                          f"  ({known_hops} hop{'s' if known_hops != 1 else ''}{snr_sfx})")
-            lines.append(f"    Intermediate nodes unknown — run t{{n}} to trace the full path")
+            lines.append(f"    Intermediate nodes unknown — run t{{n}} to trace  ·  hop count from last inbound packet, may be stale")
         else:
             lines.append(f"    [YOU] ── ? ── ... ── [{dest_name}]  (distance unknown)")
             lines.append(f"    Run t{{n}} to discover the route")
@@ -1291,7 +1300,12 @@ def show_outbound_view(iface, node_id, dest_name, pkt_id, message_text,
             else:
                 lines.append(f"  t+{ack_el:.2f}s  \u2717 NAK from {dest_name}: {ack_err}")
         else:
-            lines.append(f"  t+{elapsed:.1f}s  \u2026 waiting for ACK")
+            if elapsed >= _ack_timeout:
+                lines.append(f"  t+{elapsed:.0f}s  \u2717 No ACK received — delivery unconfirmed (mesh may still deliver)")
+                lines.append(f"  (timeout after {_ack_timeout}s — {_hops_for_timeout} hop{'s' if _hops_for_timeout != 1 else ''} × 15s + 15s base)")
+            else:
+                remaining = int(_ack_timeout - elapsed)
+                lines.append(f"  t+{elapsed:.1f}s  \u2026 waiting for ACK  (timeout in {remaining}s)")
 
         lines += ["", "  Press Enter to return to menu"]
         return lines
@@ -1443,54 +1457,9 @@ def show_node_info(iface):
     _GREEN    = "\033[32m"
     _ORANGE   = "\033[33m"
     _RESET    = "\033[0m"
-    _FLASH_BG = "\033[43m"   # yellow background for incoming-activity flash
     ping_results = {}  # {node_id: bool} — populated after 'pf' command
 
     name_w = max((len(_peer_name(p)) for _, p in favorites), default=0)
-
-    # ── incoming-activity flash ───────────────────────────────────────────
-    fav_ids   = {nid for nid, _ in favorites}
-    recent_rx = {}          # {node_id: float timestamp} i thought
-    _rx_lock  = threading.Lock()
-
-    # node rows: after print_main() header(3) + blank(1) + count(1) + blank(1) = 6
-    # so node i (1-indexed) sits on terminal row 6+i
-    _NODE_ROW0 = 6
-    _flash_stop  = threading.Event()
-    _flash_phase = [False]
-
-    def _flash_worker():
-        while not _flash_stop.wait(0.5):
-            now = time.time()
-            with _rx_lock:
-                active = {nid for nid, ts in recent_rx.items() if now - ts < 6}
-            if not active:
-                continue
-            _flash_phase[0] = not _flash_phase[0]
-            buf = "\0337"   # DECSC — save cursor
-            for i, (node_id, p) in enumerate(favorites, 1):
-                if node_id not in active:
-                    continue
-                row  = _NODE_ROW0 + i
-                name = _peer_name(p).ljust(name_w)
-                last = _ago(p.get("lastHeard"))
-                snr  = p.get("snr", "N/A")
-                hops = p.get("hopsAway")
-                hops_str = "direct" if hops == 0 else f"{hops} hops" if hops is not None else "N/A"
-                if node_id in ping_results:
-                    dot  = f"{_GREEN}●{_RESET}" if ping_results[node_id] else f"{_ORANGE}●{_RESET}"
-                    line = f"  [{i}] {dot} {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}"
-                else:
-                    line = f"  [{i}]   {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}"
-                if _flash_phase[0]:
-                    line = f"{_FLASH_BG}{line}{_RESET}"
-                buf += f"\033[{row};1H\033[K{line}"
-            buf += "\0338"  # DECRC — restore cursor
-            sys.stdout.write(buf)
-            sys.stdout.flush()
-
-    _flash_thread = threading.Thread(target=_flash_worker, daemon=True)
-    _flash_thread.start()
 
     # ── receive watchdog ──────────────────────────────────────────────────
     _watchdog_stop = threading.Event()
@@ -1509,25 +1478,7 @@ def show_node_info(iface):
     _watchdog_thread = threading.Thread(target=_watchdog, daemon=True)
     _watchdog_thread.start()
 
-    # subscribe to all receive topics to detect activity from favorites
     from pubsub import pub as _pub
-
-    def _note_rx(packet, interface):
-        sender = packet.get("from")
-        if sender in fav_ids:
-            with _rx_lock:
-                recent_rx[sender] = time.time()
-
-    _rx_topics = [
-        "meshtastic.receive.text",
-        "meshtastic.receive.position",
-        "meshtastic.receive.user",
-        "meshtastic.receive.telemetry",
-        "meshtastic.receive.neighborinfo",
-        "meshtastic.receive.traceroute",
-    ]
-    for _t in _rx_topics:
-        _pub.subscribe(_note_rx, _t)
 
     # detect unexpected BLE disconnect
     _disconnected = threading.Event()
@@ -1594,7 +1545,6 @@ def show_node_info(iface):
     print_main()
 
     if not favorites:
-        _flash_stop.set()
         return
 
     try:
@@ -1658,14 +1608,7 @@ def show_node_info(iface):
             else:
                 print("  Invalid — try d1, m2, r3, t4, rt4, or Enter to quit.")
     finally:
-        _flash_stop.set()
         _watchdog_stop.set()
-        _flash_thread.join(timeout=1)
-        for _t in _rx_topics:
-            try:
-                _pub.unsubscribe(_note_rx, _t)
-            except Exception:
-                pass
         try:
             _pub.unsubscribe(_on_connection_lost, "meshtastic.connection.lost")
         except Exception:

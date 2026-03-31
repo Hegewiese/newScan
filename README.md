@@ -15,12 +15,13 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - **Favorite nodes list** — last seen, SNR, hop count; ping results shown with green/orange status dots; supplemented by `extra_favorites.json`
 - **Ping Favorites** — sends a NodeInfo request to each favorite (5 s apart), shows who responded
 - **Node details** — ID, short name, hardware, last seen, SNR, RSSI, hops, GPS, battery, voltage, telemetry
-- **Send message** — single or repeated at a configurable interval; ACK/NAK reported per send
-- **Tracer** — single or repeated traceroute with live progress bar; full route + per-hop SNR logged
+- **Send message** — single or repeated at a configurable interval; after each send the **Outbound View** opens automatically (see below)
+- **Outbound View** — live routing-journey screen shown after every DM: last-known route visualisation (or hop-count if not yet traced), relay echo detection, ACK return path with SNR/RSSI/hop count and inferred next-hop node; updates every second until Enter is pressed
+- **Tracer** — single or repeated traceroute with live progress bar; full route + per-hop SNR logged; result cached so Outbound View can display it for subsequent messages
 - **Inflow View** — live session dashboard grouped by relay/via node: packet counts per type, avg SNR and RSSI of the last-hop link, time since last packet
 - **Config export** — `localConfig`, `moduleConfig`, and channels to a timestamped JSON file
 - **Live log footer** — last 8 lines of `newscan.log` always visible at the bottom of the terminal
-- All received packets logged with symbols: `✉` text · `⊕` position · `◉` nodeinfo · `⊡⊛` telemetry · `⬡` neighbors · `⇌` traceroute · `⌁` ping
+- All packets logged with directional arrows and color: `◀◀` incoming (bright) · `▶▶` outgoing (dim); packet-type symbols: `✉` text · `⊕` position · `◉` nodeinfo · `⊡⊛` telemetry · `⬡` neighbors · `⇌` traceroute · `⌁` ping
 
 ---
 
@@ -112,7 +113,7 @@ Nodes can be added to the favorites list independently of what the radio has mar
 | Command | Action |
 |---|---|
 | `d<n>` | Full node details |
-| `m<n>` | Send a message; ACK/NAK reported |
+| `m<n>` | Send a message; opens Outbound View (ACK, route, signal) |
 | `r<n>` | Repeat message at a chosen interval |
 | `t<n>` | Single traceroute with progress bar |
 | `rt<n>` | Repeated traceroute at a chosen interval |
@@ -128,11 +129,15 @@ Nodes can be added to the favorites list independently of what the radio has mar
 Appended to `newscan.log` in the project directory (excluded from git).
 
 ```
-2026-03-29 14:23:09  INFO      ✉ CH0 Short Slow  Alice -> MyNode: 'Hello'  [snr=5dB, rssi=-82dBm]
-2026-03-29 14:24:00  INFO      ⇌ CH0 Short Slow  Bob -> Charlie  [snr=2.0dB]
-2026-03-29 14:25:10  INFO      ⌁ ping ACK from Alice (!aabbccdd)
-2026-03-29 14:25:15  WARNING   ⌁ ping NAK from Bob (!deadbeef): NO_RESPONSE
+2026-03-29 14:23:09  INFO      ◀◀ ✉ CH0 Short Slow  Alice -> MyNode: 'Hello'  [snr=5dB, rssi=-82dBm]
+2026-03-29 14:23:09  INFO      ▶▶ CH0 Short Slow  Message sent to Bob: 'Hi'  ✉
+2026-03-29 14:24:00  INFO      ◀◀ ⇌ CH0 Short Slow  Bob -> Charlie  [snr=2.0dB]
+2026-03-29 14:25:10  INFO      ▶▶ ⌁ ping (nodeinfo request) sent to Alice (!aabbccdd)
+2026-03-29 14:25:11  INFO      ◀◀ ⌁ ping response from Alice (!aabbccdd)
+2026-03-29 14:25:15  WARNING   ◀◀ NAK from Bob (!deadbeef): NO_RESPONSE
 ```
+
+`◀◀` lines render in bright white (incoming); `▶▶` lines render in dim (outgoing).
 
 Relay nodes are resolved to full names where known (`via Alice` instead of `via !..07`). Own node packets are not logged.
 
