@@ -130,7 +130,7 @@ Live session dashboard showing which relay nodes forwarded packets to your radio
 ```
   Inflow View  —  58 packets from 3 nodes  (session 6m 14s)
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Direct Connected        Hops Out    Dist    last  Pkts   src  ████████████████████  txt pos usr tel  nb  tr    SNR   RSSI   batt
+  Last Hop                Hops Out    Dist    last  Pkts   src  ████████████████████  txt pos usr tel  nb  tr    SNR   RSSI   batt
   ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
   Morpheus                     dir   1.2km      5s    38     4  ████████████████████    9  14   3   8   2   2  ●●●● -3.5dB  -82dBm    pwr
   IAH Solar Reiheim             4h      —    1m20s    15     2  ███████░░░░░░░░░░░░░░    0   6   1   5   3   0  ○○○○    —dB    —dBm   74%
@@ -151,7 +151,7 @@ Press `e` again to collapse. Rows silent for more than 5 minutes are dimmed.
 **Columns:**
 | Column | Meaning |
 |---|---|
-| Direct Connected | Node whose radio your device physically heard (last-hop relayer) |
+| Last Hop | Node whose radio your device physically heard (last-hop relayer) |
 | Hops Out | `dir` = direct link · `Nh` = N hops away in routing table · `—` = unknown |
 | Dist | GPS-derived great-circle distance to the relay node (requires position data for both nodes) |
 | last | Time since the most recent packet from this relay |
@@ -163,7 +163,7 @@ Press `e` again to collapse. Rows silent for more than 5 minutes are dimmed.
 | SNR / RSSI | Average signal quality of the last-hop link (only packets with signal data counted) |
 | batt | Battery level of the relay node — `pwr` (green) = on external power · `N%` green/yellow/red by charge level · `—` = no data |
 
-> **Direct Connected vs. routing:** A node appearing here means your radio can hear it directly over the air. This does not imply you can reach it directly for outbound messages — the `Hops Out` column from the routing table governs that.
+> **Last Hop vs. routing:** A node appearing here means your radio can hear it directly over the air. This does not imply you can reach it directly for outbound messages — the `Hops Out` column from the routing table governs that.
 
 ### Outbound View (opens automatically after `m<n>`)
 

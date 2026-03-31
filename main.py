@@ -1677,8 +1677,8 @@ def show_inflow_view(iface):
         h1  = (f"  Inflow View  —  {total_pkts} packet{'s' if total_pkts != 1 else ''} "
                f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
                f"(session {elapsed_str})")
-        sep = "  " + "─" * 116
-        hdr = (f"  {'Direct Connected':<22}  {'Hops Out':>8}  {'Dist':>6}  {'last':>6}  {'Pkts':>5}  {'src':>4}  {'':<{BAR_W}}  "
+        sep = "  " + "─" * 119
+        hdr = (f"  {'Last Hop':<22}  {'Hops Out':>8}  {'Dist':>6}  {'last':>6}  {'·':>1}  {'src':>4}  {'Pkts':>5}  {'':<{BAR_W}}  "
                f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  "
                f"{'SNR':>5} {'RSSI':>6}  {'batt':>5}")
 
@@ -1687,6 +1687,8 @@ def show_inflow_view(iface):
         nodes_by_num = getattr(iface, "nodesByNum", None) or {}
         my_num       = iface.myInfo.my_node_num
         my_pos       = _node_pos(nodes_by_num.get(my_num))
+        SPARKS   = "▁▂▃▄▅▆▇█"
+        max_src  = max((v["src_count"] for v in snap.values()), default=1) or 1
         for node_id, d in rows_data:
             bar_fill = int(d["total"] / max_total * BAR_W)
             bar      = "\u2588" * bar_fill + "\u2591" * (BAR_W - bar_fill)
@@ -1728,8 +1730,9 @@ def show_inflow_view(iface):
                 dist_str = f"{km:.0f}km" if km >= 1 else f"{km*1000:.0f}m"
             else:
                 dist_str = "—"
-            dim = "\033[2m" if ago_s >= 300 else ""
-            lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {d['total']:>5}  {d['src_count']:>4}  {bar}  {types}  "
+            dim   = "\033[2m" if ago_s >= 300 else ""
+            spark = SPARKS[min(int(d["src_count"] / max_src * 8), 7)] if d["src_count"] > 0 else " "
+            lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {spark}  {d['src_count']:>4}  {d['total']:>5}  {bar}  {types}  "
                          f"{sig_dots}{dim} {snr_str}dB {rssi_str}dBm  {batt_display}")
             if _expanded[0] and d["sources"]:
                 sorted_srcs = sorted(d["sources"].items(), key=lambda x: x[1], reverse=True)
@@ -1737,13 +1740,13 @@ def show_inflow_view(iface):
                 parts = []
                 for num, cnt in sorted_srcs[:MAX_SHOWN]:
                     name = _rx_resolve(iface, num)
-                    if len(name) > 12:
-                        name = name[:12] + ".."
+                    if len(name) > 16:
+                        name = name[:16] + ".."
                     parts.append(f"{name}({cnt})")
                 rest = len(sorted_srcs) - MAX_SHOWN
                 if rest > 0:
                     parts.append(f"...+{rest}")
-                lines.append(f"\033[2m    ↳ {' · '.join(parts)}\033[0m")
+                lines.append(f"\033[2m    ◀ src:  {' · '.join(parts)}\033[0m")
 
         if not rows_data:
             lines.append("  (no packets received yet — waiting...)")
