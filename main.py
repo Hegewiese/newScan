@@ -7,6 +7,7 @@ Copyright by me
 import json
 import logging
 import os
+import select
 import shutil
 import subprocess
 import sys
@@ -672,13 +673,42 @@ def scan():
 
 
 def pick_device(devices):
-    """Print device list and let the user choose one. Returns the chosen BLEDevice."""
+    """Print device list and let the user choose one. Returns the chosen BLEDevice.
+
+    Auto-selects device [1] after AUTO_TIMEOUT seconds if no input is given.
+    """
+    AUTO_TIMEOUT = 5
     print()
     for i, d in enumerate(devices, 1):
         print(f"  [{i}] {d.name or 'Unknown'}  |  {d.address}")
 
     while True:
-        choice = input("\nSelect device (number) [1]: ").strip()
+        _stop_cd = threading.Event()
+
+        def _countdown():
+            for secs in range(AUTO_TIMEOUT, 0, -1):
+                if _stop_cd.is_set():
+                    return
+                sys.stdout.write(f"\rSelect device (number) [1]:  (auto in {secs}s) ")
+                sys.stdout.flush()
+                _stop_cd.wait(1)
+
+        sys.stdout.write(f"\nSelect device (number) [1]:  (auto in {AUTO_TIMEOUT}s) ")
+        sys.stdout.flush()
+
+        _cd_thread = threading.Thread(target=_countdown, daemon=True)
+        _cd_thread.start()
+
+        ready = select.select([sys.stdin], [], [], AUTO_TIMEOUT)[0]
+        _stop_cd.set()
+        _cd_thread.join(timeout=1)
+
+        if ready:
+            choice = sys.stdin.readline().strip()
+        else:
+            print()  # newline after timeout
+            choice = ""
+
         if not choice:
             log.info(f"User selected device (default): {devices[0].name} [{devices[0].address}]")
             return devices[0]
@@ -1300,7 +1330,7 @@ def show_outbound_view(iface, node_id, dest_name, pkt_id, message_text,
                 ack_hops = (hs - hl) if (hs is not None and hl is not None) else None
 
                 relay_name = None
-                if rb:
+                if rb and ack_hops != 0:
                     relay_name = f"!..{rb:02x}"
                     for num, node in (getattr(iface, "nodesByNum", None) or {}).items():
                         if isinstance(num, int) and (num & 0xFF) == rb:
@@ -1789,7 +1819,33 @@ def main():
         print(f"\nFound {len(devices)} known Meshtastic device(s):")
         for d in devices:
             print(f"  {d.name or 'Unknown'}  |  {d.address}")
-        ans = input("\nScan for additional devices? [y/N]: ").strip().lower()
+        _SCAN_TIMEOUT = 5
+        _stop_scan_cd = threading.Event()
+
+        def _scan_countdown():
+            for secs in range(_SCAN_TIMEOUT, 0, -1):
+                if _stop_scan_cd.is_set():
+                    return
+                sys.stdout.write(f"\rScan for additional devices? [y/N]:  (auto-no in {secs}s) ")
+                sys.stdout.flush()
+                _stop_scan_cd.wait(1)
+
+        sys.stdout.write(f"\nScan for additional devices? [y/N]:  (auto-no in {_SCAN_TIMEOUT}s) ")
+        sys.stdout.flush()
+
+        _scan_cd_thread = threading.Thread(target=_scan_countdown, daemon=True)
+        _scan_cd_thread.start()
+
+        _scan_ready = select.select([sys.stdin], [], [], _SCAN_TIMEOUT)[0]
+        _stop_scan_cd.set()
+        _scan_cd_thread.join(timeout=1)
+
+        if _scan_ready:
+            ans = sys.stdin.readline().strip().lower()
+        else:
+            print()
+            ans = "n"
+
         if ans == "y":
             scanned = scan()
             known_addresses = {d.address for d in devices}
