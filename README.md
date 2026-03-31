@@ -69,9 +69,9 @@ python main.py
 ### Main view
 
 ```
-================================================================
-MyNode  |  !04332f58  |  hw HELTEC_V3  |  ✅ 2.5.x
-================================================================
+==============================================================================
+MyNode  |  !04332f58  |  hw HELTEC_V3  |  bat ▰▰▰▰▱ 82%  |  ✅ 2.5.x
+==============================================================================
 
 Favorite peers: 3 of 18 visible
 
@@ -129,27 +129,28 @@ Live session dashboard showing which relay nodes forwarded packets to your radio
 
 ```
   Inflow View  —  58 packets from 3 nodes  (session 6m 14s)
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Via                     Hops    Dist  Pkts  ████████████████████  txt pos usr tel   nb  tr    SNR   RSSI    last
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Morpheus                 dir   1.2km    38  ████████████████████    9  14   3   8    2   2   -3.5dB  -82dBm     5s
-  IAH Solar Reiheim         4h      —     15  ███████░░░░░░░░░░░░░░    0   6   1   5    3   0      —      —    1m20s
-  Unknown !..3a             —      —      5  ██░░░░░░░░░░░░░░░░░░░    1   2   0   2    0   0   -9.0dB  -95dBm    43s
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Direct Connected        Hops Out    Dist    last  Pkts  ████████████████████  txt pos usr tel  nb  tr    SNR   RSSI
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Morpheus                     dir   1.2km      5s    38  ████████████████████    9  14   3   8   2   2  ●●●● -3.5dB  -82dBm
+  IAH Solar Reiheim             4h      —    1m20s    15  ███████░░░░░░░░░░░░░░    0   6   1   5   3   0  ○○○○    —dB    —dBm
+  Unknown !..3a                  —      —      43s     5  ██░░░░░░░░░░░░░░░░░░░    1   2   0   2   0   0  ●○○○ -9.0dB  -95dBm
 ```
 
 **Columns:**
 | Column | Meaning |
 |---|---|
-| Via | Node whose radio your device physically heard (last-hop relayer) |
-| Hops | `dir` = direct link · `Nh` = N hops away in routing table · `—` = unknown |
+| Direct Connected | Node whose radio your device physically heard (last-hop relayer) |
+| Hops Out | `dir` = direct link · `Nh` = N hops away in routing table · `—` = unknown |
 | Dist | GPS-derived great-circle distance to the relay node (requires position data for both nodes) |
+| last | Time since the most recent packet from this relay |
 | Pkts | Total packets relayed by this node this session |
 | Bar | Relative packet volume |
 | txt pos usr tel nb tr | Per-type packet counts (text · position · nodeinfo · telemetry · neighborinfo · traceroute) |
+| Signal dots | `●●●●` green > 5 dB · `●●●○` bright green 0–5 dB · `●●○○` yellow −10–0 dB · `●○○○` red < −10 dB · `○○○○` no data |
 | SNR / RSSI | Average signal quality of the last-hop link (only packets with signal data counted) |
-| last | Time since the most recent packet from this relay |
 
-> **Via vs. routing:** A node appearing here means your radio can hear it directly over the air. This does not imply you can reach it directly for outbound messages — the `Hops` column from the routing table governs that.
+> **Direct Connected vs. routing:** A node appearing here means your radio can hear it directly over the air. This does not imply you can reach it directly for outbound messages — the `Hops Out` column from the routing table governs that.
 
 ### Outbound View (opens automatically after `m<n>`)
 
@@ -204,13 +205,17 @@ Shown immediately after sending a DM. Updates every second until Enter is presse
 Appended to `newscan.log` in the project directory (excluded from git).
 
 ```
-2026-03-29 14:23:09  INFO      ◀◀ ✉ CH0 Short Slow  Alice -> MyNode: 'Hello'  [snr=5dB, rssi=-82dBm]
-2026-03-29 14:23:09  INFO      ▶▶ CH0 Short Slow  Message sent to Bob: 'Hi'  ✉
-2026-03-29 14:24:00  INFO      ◀◀ ⇌ CH0 Short Slow  Bob -> Charlie  [snr=2.0dB]
-2026-03-29 14:25:10  INFO      ▶▶ ⌁ ping (nodeinfo request) sent to Alice (!aabbccdd)
-2026-03-29 14:25:11  INFO      ◀◀ ⌁ ping response from Alice (!aabbccdd)
-2026-03-29 14:25:15  WARNING   ◀◀ NAK from Bob (!deadbeef): NO_RESPONSE
+----  2026-03-29 14:23:42  INFO      === newscan starting ===
+----  2026-03-29 14:23:47  INFO      Connecting to HEHO_ab07
+HEHO  2026-03-29 14:24:12  INFO      Connected to HEHO_ab07
+HEHO  2026-03-29 14:24:13  INFO      ◀◀ ✉ CH0 Short Slow  Alice -> MyNode: 'Hello'  [snr=5dB, rssi=-82dBm]
+HEHO  2026-03-29 14:24:13  INFO      ▶▶ CH0 Short Slow  Message sent to Bob: 'Hi'  ✉
+HEMO  2026-03-29 14:24:14  INFO      Connected to HEMO_cb7e
+HEMO  2026-03-29 14:25:10  INFO      ▶▶ ⌁ ping (nodeinfo request) sent to Alice (!aabbccdd)
+HEMO  2026-03-29 14:25:15  WARNING   ◀◀ NAK from Bob (!deadbeef): NO_RESPONSE
 ```
+
+Every line is prefixed with the connected node's short name (4-char radio identifier). Pre-connection lines show `----`. When switching between devices in one session the prefix changes accordingly.
 
 `◀◀` lines render in bright white (incoming); `▶▶` lines render in dim (outgoing).
 

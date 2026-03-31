@@ -7,6 +7,7 @@ Copyright by me
 import json
 import logging
 import os
+import re
 import select
 import shutil
 import subprocess
@@ -178,12 +179,23 @@ except ImportError:
     print("Error: meshtastic not installed. Run: pip install meshtastic bleak")
     sys.exit(1)
 
+_current_node_short: str = "----"
+
+
+class _NodeFilter(logging.Filter):
+    """Inject the current connected node's short name into every log record."""
+    def filter(self, record):
+        record.node = _current_node_short
+        return True
+
+
 logging.basicConfig(
     filename=os.path.join(os.path.dirname(os.path.abspath(__file__)), "newscan.log"),
     level=logging.WARNING,  # suppress third-party library noise (bleak, meshtastic, dbus, …)
-    format="%(asctime)s  %(levelname)-8s  %(message)s",
+    format="%(node)-4s  %(asctime)s  %(levelname)-8s  %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+logging.root.handlers[0].addFilter(_NodeFilter())
 log = logging.getLogger("newscan")
 log.setLevel(logging.DEBUG)  # our own logger always writes in full detail
 
@@ -934,6 +946,28 @@ def _ch_label(iface, channel_index: int) -> str:
     return f"CH{channel_index} {name}" if name else f"CH{channel_index}"
 
 
+_ANSI_ESC = re.compile(r'\033\[[0-9;]*m')
+
+def _visual_len(s: str) -> int:
+    """Return the printable length of a string, ignoring ANSI escape codes."""
+    return len(_ANSI_ESC.sub('', s))
+
+
+def _bat_bar(level) -> str:
+    """Return a colored ▰▱ segment battery indicator for level 0-100, or None."""
+    if level is None:
+        return "\033[90m▱▱▱▱▱\033[0m  —%"
+    if level > 100:
+        return "\033[96m▰▰▰▰▰\033[0m 100% PWR"
+    filled = round(level / 100 * 5)
+    bar = "▰" * filled + "▱" * (5 - filled)
+    if   level > 75: color = "\033[32m"   # green
+    elif level > 50: color = "\033[92m"   # bright green
+    elif level > 25: color = "\033[33m"   # yellow
+    else:            color = "\033[31m"   # red
+    return f"{color}{bar}\033[0m {level}%"
+
+
 def _ago(ts):
     """Format a Unix timestamp aas a human-readable 'X ago' string."""
     if not ts:
@@ -1638,10 +1672,10 @@ def show_inflow_view(iface):
         h1  = (f"  Inflow View  —  {total_pkts} packet{'s' if total_pkts != 1 else ''} "
                f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
                f"(session {elapsed_str})")
-        sep = "  " + "─" * 100
-        hdr = (f"  {'Via':<22}  {'Hops':>4}  {'Dist':>6}  {'Pkts':>5}  {'':<{BAR_W}}  "
+        sep = "  " + "─" * 104
+        hdr = (f"  {'Direct Connected':<22}  {'Hops Out':>8}  {'Dist':>6}  {'last':>6}  {'Pkts':>5}  {'':<{BAR_W}}  "
                f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  "
-               f"{'SNR':>5} {'RSSI':>6}  {'last':>6}")
+               f"{'SNR':>5} {'RSSI':>6}")
 
         lines = [h1, sep, hdr, sep]
 
@@ -1657,8 +1691,18 @@ def show_inflow_view(iface):
             ago_s    = int(time.time() - d["last_ts"])
             ago_str  = f"{ago_s // 60}m{ago_s % 60:02d}s" if ago_s >= 60 else f"{ago_s}s"
             sc = d["sig_count"]
-            snr_str  = f"{d['snr_sum']  / sc:>4.1f}" if sc else "   —"
-            rssi_str = f"{d['rssi_sum'] // sc:>4}"   if sc else "   —"
+            snr_val  = d['snr_sum']  / sc if sc else None
+            rssi_val = d['rssi_sum'] // sc if sc else None
+            snr_str  = f"{snr_val:>4.1f}" if snr_val is not None else "   —"
+            rssi_str = f"{rssi_val:>4}"   if rssi_val is not None else "   —"
+            if snr_val is not None:
+                if   snr_val >  5: _sc, _dots = "\033[32m",  "●●●●"
+                elif snr_val >  0: _sc, _dots = "\033[92m",  "●●●○"
+                elif snr_val > -10: _sc, _dots = "\033[33m", "●●○○"
+                else:               _sc, _dots = "\033[31m", "●○○○"
+            else:
+                _sc, _dots = "\033[90m", "○○○○"
+            sig_dots = f"{_sc}{_dots}\033[0m"
             relay_num = d.get("node_num")
             hops = nodes_by_num.get(relay_num, {}).get("hopsAway") if relay_num else None
             hops_str = "dir" if hops == 0 else f"{hops}h" if hops is not None else "—"
@@ -1668,8 +1712,8 @@ def show_inflow_view(iface):
                 dist_str = f"{km:.0f}km" if km >= 1 else f"{km*1000:.0f}m"
             else:
                 dist_str = "—"
-            lines.append(f"  {name}  {hops_str:>4}  {dist_str:>6}  {d['total']:>5}  {bar}  {types}  "
-                         f"{snr_str}dB {rssi_str}dBm  {ago_str:>6}")
+            lines.append(f"  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {d['total']:>5}  {bar}  {types}  "
+                         f"{sig_dots} {snr_str}dB {rssi_str}dBm")
 
         if not rows_data:
             lines.append("  (no packets received yet — waiting...)")
@@ -1704,7 +1748,9 @@ def show_node_info(iface):
     """Print info about the connected node and visible mesh peers."""
     my_num = iface.myInfo.my_node_num
     metadata = iface.metadata
+    global _current_node_short
     node_name = iface.getLongName() or "Unknown"
+    _current_node_short = (iface.getShortName() or node_name[:4]).strip()
     fw = metadata.firmware_version if metadata else "N/A"
     hw = metadata.hw_model if metadata else "N/A"
     try:
@@ -1798,8 +1844,9 @@ def show_node_info(iface):
             msg = "⚠  check failed"
         _fw_status[0] = f"  |  {msg}"
         # Repaint rows 1-3 (separator / header / separator) in-place
-        h   = f"{node_name}  |  !{my_num:08x}  |  hw {hw_display}{_fw_status[0]}"
-        sep = "=" * len(h)
+        _bat_lvl = ((getattr(iface, "nodesByNum", None) or {}).get(my_num) or {}).get("deviceMetrics", {}).get("batteryLevel")
+        h   = f"{node_name}  |  !{my_num:08x}  |  hw {hw_display}  |  bat {_bat_bar(_bat_lvl)}{_fw_status[0]}"
+        sep = "=" * _visual_len(h)
         buf = ("\0337"
                + f"\033[1;1H\033[K{sep}"
                + f"\033[2;1H\033[K{h}"
@@ -1813,10 +1860,11 @@ def show_node_info(iface):
     # ── main display / command loop ───────────────────────────────────────
     def print_main():
         clear_screen()
-        h = f"{node_name}  |  !{my_num:08x}  |  hw {hw_display}{_fw_status[0]}"
-        print("=" * len(h))
+        _bat_lvl = ((getattr(iface, "nodesByNum", None) or {}).get(my_num) or {}).get("deviceMetrics", {}).get("batteryLevel")
+        h = f"{node_name}  |  !{my_num:08x}  |  hw {hw_display}  |  bat {_bat_bar(_bat_lvl)}{_fw_status[0]}"
+        print("=" * _visual_len(h))
         print(h)
-        print("=" * len(h))
+        print("=" * _visual_len(h))
         if not favorites:
             print("\nNo favorite nodes visible yet.")
             return
