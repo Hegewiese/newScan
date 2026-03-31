@@ -9,7 +9,7 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 ## Features
 
 - Startup requirements check (platform, Python, venv, Bluetooth)
-- Smart device discovery — checks paired devices via `bluetoothctl` (Linux), falls back to full BLE scan
+- Smart device discovery — checks paired devices via `bluetoothctl` (Linux), falls back to full BLE scan; auto-prompts interactive pairing if the device is not yet paired
 - Fast BLE connection with animated spinner
 - **Firmware update check** — compares connected node firmware against latest GitHub release in the background; result shown in the header row as `✅ up to date` or `🔴 <new version> available`
 - **Favorite nodes list** — last seen, SNR, hop count; ping results shown with green/orange status dots; supplemented by `extra_favorites.json`
@@ -18,7 +18,7 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - **Send message** — single or repeated at a configurable interval; after each send the **Outbound View** opens automatically (see below)
 - **Outbound View** — live routing-journey screen shown after every DM: last-known route visualisation (or hop-count if not yet traced), relay echo detection, ACK return path with SNR/RSSI/hop count and inferred next-hop node; updates every second until Enter is pressed
 - **Tracer** — single or repeated traceroute with live progress bar; full route + per-hop SNR logged; result cached so Outbound View can display it for subsequent messages
-- **Inflow View** — live session dashboard grouped by relay/via node: packet counts per type, avg SNR and RSSI of the last-hop link, time since last packet
+- **Inflow View** — live session dashboard grouped by relay/via node: packet counts per type, unique source node count, avg SNR/RSSI of the last-hop link, battery level, time since last packet; stale relays dimmed after 5 min silence; press `e` to expand per-relay source node list
 - **Config export** — `localConfig`, `moduleConfig`, and channels to a timestamped JSON file
 - **Live log footer** — last 8 lines of `newscan.log` always visible at the bottom of the terminal
 - All packets logged with directional arrows and color: `◀◀` incoming (bright) · `▶▶` outgoing (dim); packet-type symbols: `✉` text · `⊕` position · `◉` nodeinfo · `⊡⊛` telemetry · `⬡` neighbors · `⇌` traceroute · `⌁` ping
@@ -129,13 +129,24 @@ Live session dashboard showing which relay nodes forwarded packets to your radio
 
 ```
   Inflow View  —  58 packets from 3 nodes  (session 6m 14s)
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Direct Connected        Hops Out    Dist    last  Pkts  ████████████████████  txt pos usr tel  nb  tr    SNR   RSSI
-  ────────────────────────────────────────────────────────────────────────────────────────────────────────────
-  Morpheus                     dir   1.2km      5s    38  ████████████████████    9  14   3   8   2   2  ●●●● -3.5dB  -82dBm
-  IAH Solar Reiheim             4h      —    1m20s    15  ███████░░░░░░░░░░░░░░    0   6   1   5   3   0  ○○○○    —dB    —dBm
-  Unknown !..3a                  —      —      43s     5  ██░░░░░░░░░░░░░░░░░░░    1   2   0   2   0   0  ●○○○ -9.0dB  -95dBm
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Direct Connected        Hops Out    Dist    last  Pkts   src  ████████████████████  txt pos usr tel  nb  tr    SNR   RSSI   batt
+  ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  Morpheus                     dir   1.2km      5s    38     4  ████████████████████    9  14   3   8   2   2  ●●●● -3.5dB  -82dBm    pwr
+  IAH Solar Reiheim             4h      —    1m20s    15     2  ███████░░░░░░░░░░░░░░    0   6   1   5   3   0  ○○○○    —dB    —dBm   74%
+  Unknown !..3a                  —      —      43s     5     1  ██░░░░░░░░░░░░░░░░░░░    1   2   0   2   0   0  ●○○○ -9.0dB  -95dBm     —
 ```
+
+Press `e` to expand the source node list beneath each relay row:
+
+```
+  Morpheus                     dir   1.2km      5s    38     4  ████████████████████  ...  pwr
+    ↳ Alice · Bob · Charlie · Dave
+  IAH Solar Reiheim             4h      —    1m20s    15     2  ███████░░░░░░░░░░░░░░  ...   74%
+    ↳ Eve · Frank
+```
+
+Press `e` again to collapse. Rows silent for more than 5 minutes are dimmed.
 
 **Columns:**
 | Column | Meaning |
@@ -145,10 +156,12 @@ Live session dashboard showing which relay nodes forwarded packets to your radio
 | Dist | GPS-derived great-circle distance to the relay node (requires position data for both nodes) |
 | last | Time since the most recent packet from this relay |
 | Pkts | Total packets relayed by this node this session |
+| src | Number of unique source nodes whose packets arrived via this relay |
 | Bar | Relative packet volume |
 | txt pos usr tel nb tr | Per-type packet counts (text · position · nodeinfo · telemetry · neighborinfo · traceroute) |
 | Signal dots | `●●●●` green > 5 dB · `●●●○` bright green 0–5 dB · `●●○○` yellow −10–0 dB · `●○○○` red < −10 dB · `○○○○` no data |
 | SNR / RSSI | Average signal quality of the last-hop link (only packets with signal data counted) |
+| batt | Battery level of the relay node — `pwr` (green) = on external power · `N%` green/yellow/red by charge level · `—` = no data |
 
 > **Direct Connected vs. routing:** A node appearing here means your radio can hear it directly over the air. This does not imply you can reach it directly for outbound messages — the `Hops Out` column from the routing table governs that.
 

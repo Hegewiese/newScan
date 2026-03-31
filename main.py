@@ -614,11 +614,13 @@ def start_message_log(iface) -> None:
                         "text": 0, "position": 0, "user": 0,
                         "telemetry": 0, "neighborinfo": 0, "traceroute": 0,
                         "snr_sum": 0.0, "rssi_sum": 0, "sig_count": 0,
+                        "sources": set(),
                         "last_ts": time.time(),
                     }
                 d = _inflow_data[key]
                 d["total"]   += 1
                 d[pkt_type]  += 1
+                d["sources"].add(packet["from"])
                 d["last_ts"]  = time.time()
                 if snr is not None:
                     d["snr_sum"]   += snr
@@ -1660,9 +1662,11 @@ def show_inflow_view(iface):
     _stop = threading.Event()
     BAR_W = 20
 
+    _expanded = [False]
+
     def _render():
         with _inflow_lock:
-            snap = {k: dict(v) for k, v in _inflow_data.items()}
+            snap = {k: {**v, "src_count": len(v["sources"]), "sources": frozenset(v["sources"])} for k, v in _inflow_data.items()}
         rows_data  = sorted(snap.items(), key=lambda x: x[1]["total"], reverse=True)
         total_pkts = sum(v["total"] for v in snap.values())
         elapsed    = int(time.time() - _inflow_start_ts)
@@ -1672,10 +1676,10 @@ def show_inflow_view(iface):
         h1  = (f"  Inflow View  —  {total_pkts} packet{'s' if total_pkts != 1 else ''} "
                f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
                f"(session {elapsed_str})")
-        sep = "  " + "─" * 104
-        hdr = (f"  {'Direct Connected':<22}  {'Hops Out':>8}  {'Dist':>6}  {'last':>6}  {'Pkts':>5}  {'':<{BAR_W}}  "
+        sep = "  " + "─" * 116
+        hdr = (f"  {'Direct Connected':<22}  {'Hops Out':>8}  {'Dist':>6}  {'last':>6}  {'Pkts':>5}  {'src':>4}  {'':<{BAR_W}}  "
                f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  "
-               f"{'SNR':>5} {'RSSI':>6}")
+               f"{'SNR':>5} {'RSSI':>6}  {'batt':>5}")
 
         lines = [h1, sep, hdr, sep]
 
@@ -1706,19 +1710,35 @@ def show_inflow_view(iface):
             relay_num = d.get("node_num")
             hops = nodes_by_num.get(relay_num, {}).get("hopsAway") if relay_num else None
             hops_str = "dir" if hops == 0 else f"{hops}h" if hops is not None else "—"
+            batt = nodes_by_num.get(relay_num, {}).get("deviceMetrics", {}).get("batteryLevel") if relay_num else None
+            if batt is None:
+                batt_display = "\033[90m    —\033[0m"
+            elif batt > 100:
+                batt_display = "\033[32m  pwr\033[0m"
+            elif batt >= 70:
+                batt_display = f"\033[32m{batt:>4}%\033[0m"
+            elif batt >= 30:
+                batt_display = f"\033[33m{batt:>4}%\033[0m"
+            else:
+                batt_display = f"\033[31m{batt:>4}%\033[0m"
             relay_pos = _node_pos(nodes_by_num.get(relay_num)) if relay_num else None
             if my_pos and relay_pos:
                 km = _haversine(*my_pos, *relay_pos)
                 dist_str = f"{km:.0f}km" if km >= 1 else f"{km*1000:.0f}m"
             else:
                 dist_str = "—"
-            lines.append(f"  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {d['total']:>5}  {bar}  {types}  "
-                         f"{sig_dots} {snr_str}dB {rssi_str}dBm")
+            dim = "\033[2m" if ago_s >= 300 else ""
+            lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {d['total']:>5}  {d['src_count']:>4}  {bar}  {types}  "
+                         f"{sig_dots}{dim} {snr_str}dB {rssi_str}dBm  {batt_display}")
+            if _expanded[0] and d["sources"]:
+                src_names = sorted(_rx_resolve(iface, num) for num in d["sources"])
+                lines.append(f"\033[2m    ↳ {' · '.join(src_names)}\033[0m")
 
         if not rows_data:
             lines.append("  (no packets received yet — waiting...)")
 
-        lines += ["", "  Press Enter to return to menu"]
+        e_hint = "collapse sources" if _expanded[0] else "expand sources"
+        lines += ["", f"  Press Enter to return  |  [e] {e_hint}"]
         return lines
 
     def _refresh_worker():
@@ -1735,11 +1755,31 @@ def show_inflow_view(iface):
     for line in _render():
         print(line)
 
+    def _push_refresh():
+        lines = _render()
+        buf = "\0337"
+        for i, line in enumerate(lines, 1):
+            buf += f"\033[{i};1H\033[K{line}"
+        buf += "\0338"
+        sys.stdout.write(buf)
+        sys.stdout.flush()
+
     _t = threading.Thread(target=_refresh_worker, daemon=True)
     _t.start()
+    import tty, termios
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
     try:
-        input("")
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch in ('\r', '\n', '\x03', 'q'):
+                break
+            elif ch.lower() == 'e':
+                _expanded[0] = not _expanded[0]
+                _push_refresh()
     finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
         _stop.set()
         _t.join(timeout=1)
 
@@ -2071,6 +2111,37 @@ def export_node_config(iface):
         print(f"  [WARN] Config export failed (write): {e}")
 
 
+def _ensure_paired(address):
+    """Pair the device interactively in the terminal before connecting.
+
+    If the device is not yet paired BlueZ would pop a fleeting system dialog.
+    Running bluetoothctl pair here keeps the passkey prompt in the terminal
+    and gives the user time to respond.
+    """
+    if sys.platform != "linux":
+        return
+    try:
+        info = subprocess.run(
+            ["bluetoothctl", "info", address],
+            capture_output=True, text=True, timeout=3,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return
+    if "Paired: yes" in info.stdout:
+        return
+    log.info(f"Device {address} not paired — starting interactive pairing")
+    print(f"\n  Device not yet paired. Starting pairing for {address}...")
+    print("  Enter the PIN / passkey when prompted:\n")
+    try:
+        subprocess.run(["bluetoothctl", "pair", address], timeout=60)
+    except subprocess.TimeoutExpired:
+        log.warning(f"_ensure_paired: pairing timed out for {address}")
+        print("  [WARN] Pairing timed out.")
+    except FileNotFoundError:
+        log.warning("_ensure_paired: bluetoothctl not found")
+    print()
+
+
 def _ensure_disconnected(address):
     """On Linux, drop an existing BLE connection before we try to connect ourselves.
 
@@ -2166,6 +2237,7 @@ def main():
 
     device = pick_device(devices)
     _ensure_disconnected(device.address)
+    _ensure_paired(device.address)
 
     # Spinner runs in background; BLE connection stays on main thread
     _spin_done = threading.Event()
