@@ -1746,7 +1746,7 @@ def show_inflow_view(iface):
                 rest = len(sorted_srcs) - MAX_SHOWN
                 if rest > 0:
                     parts.append(f"...+{rest}")
-                lines.append(f"\033[2m    ◀ src:  {' · '.join(parts)}\033[0m")
+                lines.append(f"\033[2m    ◀ from:  {' · '.join(parts)}\033[0m")
 
         if not rows_data:
             lines.append("  (no packets received yet — waiting...)")
