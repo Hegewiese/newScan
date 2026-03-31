@@ -379,6 +379,7 @@ _inflow_data: dict = {}   # {node_id_int: {name, total, text, position, user,
                            #                telemetry, neighborinfo, traceroute,
                            #                relay, last_ts}}
 _inflow_start_ts: float = 0.0
+_node_snr_history: dict = {}  # {node_num_int: [snr, ...]} last 8 readings per source node
 
 # ---------------------------------------------------------------------------
 # Route cache — populated whenever a traceroute completes successfully
@@ -586,6 +587,7 @@ def start_message_log(iface) -> None:
     _inflow_start_ts = time.time()
     with _inflow_lock:
         _inflow_data.clear()
+        _node_snr_history.clear()
 
     def _make_inflow_handler(pkt_type):
         def _handler(packet, interface):
@@ -631,6 +633,10 @@ def start_message_log(iface) -> None:
                     d["snr_history"].append(snr)
                     if len(d["snr_history"]) > 8:
                         d["snr_history"].pop(0)
+                    src_hist = _node_snr_history.setdefault(src, [])
+                    src_hist.append(snr)
+                    if len(src_hist) > 8:
+                        src_hist.pop(0)
         return _handler
 
     _inflow_topics = [
@@ -1731,7 +1737,7 @@ def show_inflow_view(iface):
             relay_pos = _node_pos(nodes_by_num.get(relay_num)) if relay_num else None
             if my_pos and relay_pos:
                 km = _haversine(*my_pos, *relay_pos)
-                dist_str = f"{km:.0f}km" if km >= 1 else f"{km*1000:.0f}m"
+                dist_str = f"{km:.0f}km" if km >= 3 else f"{km:.1f}km"
             else:
                 dist_str = "—"
             dim   = "\033[2m" if ago_s >= 300 else ""
@@ -1764,12 +1770,13 @@ def show_inflow_view(iface):
                 if rest > 0:
                     parts.append(f"...+{rest}")
                 lines.append(f"\033[2m    ◀ from:  {' · '.join(parts)}\033[0m")
+            lines.append("")
 
         if not rows_data:
             lines.append("  (no packets received yet — waiting...)")
 
         e_hint = "collapse sources" if _expanded[0] else "expand sources"
-        lines += ["", f"  Press Enter to return  |  [e] {e_hint}"]
+        lines += [sep, "", f"  Press Enter to return  |  [e] {e_hint}"]
         return lines
 
     def _refresh_worker():
@@ -1851,8 +1858,9 @@ def show_node_info(iface):
             continue
         if node_id in _fav_ids:
             continue  # already a favorite from the radio
-        if node_id in nodes:
-            favorites.append((node_id, nodes[node_id]))
+        node_data = nodes.get(node_id) or nodes.get(f"!{node_id:08x}")
+        if node_data:
+            favorites.append((node_id, node_data))
         else:
             name = entry.get("name") or raw_id
             short = entry.get("short") or name[:4]
@@ -1940,17 +1948,41 @@ def show_node_info(iface):
             print("\nNo favorite nodes visible yet.")
             return
         print(f"\nFavorite peers: {len(favorites)} of {len(all_peers)} visible\n")
+        _SPARKS = "▁▂▃▄▅▆▇█"
         for i, (node_id, p) in enumerate(favorites, 1):
-            name = _peer_name(p).ljust(name_w)
-            last = _ago(p.get("lastHeard"))
-            snr  = p.get("snr", "N/A")
-            hops = p.get("hopsAway")
-            hops_str = "direct" if hops == 0 else f"{hops} hops" if hops is not None else "N/A"
-            if node_id in ping_results:
-                dot = f"{_GREEN}●{_RESET}" if ping_results[node_id] else f"{_ORANGE}●{_RESET}"
-                print(f"  [{i}] {dot} {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
+            name    = _peer_name(p).ljust(name_w)
+            last    = _ago(p.get("lastHeard"))
+            snr_val = p.get("snr")
+            hops    = p.get("hopsAway")
+            hops_str = "direct" if hops == 0 else f"{hops} hop{'s' if hops != 1 else ''}" if hops is not None else "N/A"
+            # signal dots
+            if snr_val is not None:
+                if   snr_val >  5:  _sc, _dd = "\033[32m",  "●●●●"
+                elif snr_val >  0:  _sc, _dd = "\033[92m",  "●●●○"
+                elif snr_val > -10: _sc, _dd = "\033[33m",  "●●○○"
+                else:               _sc, _dd = "\033[31m",  "●○○○"
             else:
-                print(f"  [{i}]   {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
+                _sc, _dd = "\033[90m", "○○○○"
+            sig_dots = f"{_sc}{_dd}\033[0m"
+            # sparkline from per-node SNR history
+            node_num = node_id if isinstance(node_id, int) else int(str(node_id).lstrip("!"), 16)
+            with _inflow_lock:
+                hist = list(_node_snr_history.get(node_num, []))
+            if len(hist) < 2:
+                snr_spark = "\033[90m" + "·" * 8 + "\033[0m"
+            else:
+                lo, hi = min(hist), max(hist)
+                spread = hi - lo
+                if spread == 0:
+                    chars = "▄" * len(hist) + "·" * (8 - len(hist))
+                else:
+                    chars = "".join(_SPARKS[min(int((v - lo) / spread * 8), 7)] for v in hist)
+                    chars = chars.ljust(8, "·")
+                col = "\033[32m" if spread < 3 else "\033[33m" if spread < 7 else "\033[31m"
+                snr_spark = f"{col}{chars}\033[0m"
+            snr_str = f"{snr_val:>+5.1f}dB" if snr_val is not None else "     N/A"
+            pdot = (f"{_GREEN}●{_RESET}" if ping_results[node_id] else f"{_ORANGE}●{_RESET}") if node_id in ping_results else " "
+            print(f"  [{i}] {pdot} {name}  {last:<12}  {sig_dots} {snr_spark}  {snr_str}   {hops_str}")
         c = 22
         print(f"\n  {'d<n> Node Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}{'i   Inflow View'.ljust(c)}Enter to quit"
               f"\n  {'pf  Ping Favorites'.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}{'e   Export config'.ljust(c)}l   Log fullscreen")
