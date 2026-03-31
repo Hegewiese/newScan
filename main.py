@@ -1137,9 +1137,10 @@ def show_outbound_view(iface, node_id, dest_name, pkt_id, message_text,
             dest_num = int(node_id[1:], 16)
         except ValueError:
             pass
-    dest_node  = ((getattr(iface, "nodesByNum", None) or {}).get(dest_num) or {})
-    known_hops = dest_node.get("hopsAway")
-    known_snr  = dest_node.get("snr")
+    dest_node    = ((getattr(iface, "nodesByNum", None) or {}).get(dest_num) or {})
+    known_hops   = dest_node.get("hopsAway")
+    known_snr    = dest_node.get("snr")
+    last_heard   = dest_node.get("lastHeard")
 
     # hop-scaled ACK timeout: 15s base + 15s per hop, floor 45s
     _hops_for_timeout = known_hops if known_hops is not None else 4
@@ -1243,9 +1244,14 @@ def show_outbound_view(iface, node_id, dest_name, pkt_id, message_text,
             lines.append(f"    [YOU] ────────────────────── [{dest_name}]  (direct link)")
         elif known_hops is not None:
             snr_sfx = f"  last SNR {known_snr:+.1f}dB" if known_snr is not None else ""
+            if last_heard:
+                age_s = int(time.time() - last_heard)
+                age_sfx = f"  ·  {age_s // 60}m ago" if age_s >= 60 else f"  ·  {age_s}s ago"
+            else:
+                age_sfx = ""
             hops_vis = " ── ? " * known_hops
             lines.append(f"    [YOU]{hops_vis}── [{dest_name}]"
-                         f"  ({known_hops} hop{'s' if known_hops != 1 else ''}{snr_sfx})")
+                         f"  ({known_hops} hop{'s' if known_hops != 1 else ''}{snr_sfx}{age_sfx})")
             lines.append(f"    Intermediate nodes unknown — run t{{n}} to trace  ·  hop count from last inbound packet, may be stale")
         else:
             lines.append(f"    [YOU] ── ? ── ... ── [{dest_name}]  (distance unknown)")
