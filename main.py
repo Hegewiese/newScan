@@ -196,10 +196,13 @@ _FOOTER_ROWS = _TAIL_LINES + 1          # separator row + 5 log lines
 _tail_cache: list = []
 _tail_lock = threading.Lock()
 _tail_proc = None
+_log_fullscreen: bool = False
 
 
 def _redraw_log_footer() -> None:
     """Overwrite the pinned footer rows without disturbing the cursor."""
+    if _log_fullscreen:
+        return
     try:
         cols, rows = shutil.get_terminal_size()
     except Exception:
@@ -234,6 +237,72 @@ def _setup_scroll_region() -> None:
     sys.stdout.write(f"\033[1;{rows - _FOOTER_ROWS}r")
     sys.stdout.flush()
     _redraw_log_footer()
+
+
+def _redraw_log_fullscreen() -> None:
+    """Repaint the entire terminal with log lines, preserving the cursor position."""
+    try:
+        cols, rows = shutil.get_terminal_size()
+    except Exception:
+        return
+    n = max(1, rows - 3)
+    try:
+        with open(_LOG_PATH, "r") as _f:
+            log_lines = _f.readlines()[-n:]
+    except Exception:
+        log_lines = []
+    label = " LOG VIEW — newscan.log  (l to return) "
+    buf = "\0337"
+    buf += f"\033[1;1H\033[K" + "─" * 2 + label + "─" * max(0, cols - 2 - len(label))
+    for i in range(n):
+        text = log_lines[i].rstrip() if i < len(log_lines) else ""
+        if "WARNING" in text or "ERROR" in text:
+            text = f"\033[31m{text[:cols]}\033[0m"
+        elif "tracer [" in text or "tracer to " in text or "Repeated tracer" in text:
+            text = f"\033[94m{text[:cols]}\033[0m"
+        else:
+            text = text[:cols]
+        buf += f"\033[{i + 2};1H\033[K{text}"
+    buf += "\0338"
+    sys.stdout.write(buf)
+    sys.stdout.flush()
+
+
+def show_log_fullscreen() -> None:
+    """Toggle the log footer into a full-terminal view. Returns when 'l' is pressed."""
+    global _log_fullscreen
+    _log_fullscreen = True
+    _stop = threading.Event()
+    try:
+        rows = shutil.get_terminal_size().lines
+    except Exception:
+        rows = 24
+    # Set full-terminal scroll region and clear — do NOT use clear_screen() here
+    # because it calls _setup_scroll_region() which would restore the footer region.
+    sys.stdout.write(f"\033[1;{rows}r\033[H\033[2J")
+    sys.stdout.flush()
+    _redraw_log_fullscreen()
+    # Park cursor at the bottom row so DECSC/DECRC in the refresh thread
+    # saves/restores the input position rather than the top of the screen.
+    sys.stdout.write(f"\033[{rows};1H")
+    sys.stdout.flush()
+
+    def _refresh():
+        while not _stop.wait(1.0):
+            _redraw_log_fullscreen()
+
+    _t = threading.Thread(target=_refresh, daemon=True)
+    _t.start()
+    try:
+        while True:
+            if input("").strip().lower() == "l":
+                break
+    finally:
+        _stop.set()
+        _t.join(timeout=1)
+        _log_fullscreen = False
+        _setup_scroll_region()
+
 
 
 def _tail_worker() -> None:
@@ -1765,7 +1834,7 @@ def show_node_info(iface):
                 print(f"  [{i}]   {name}  {last:<12}  SNR: {str(snr):<6}  {hops_str}")
         c = 22
         print(f"\n  {'d<n> Node Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}{'i   Inflow View'.ljust(c)}Enter to quit"
-              f"\n  {'pf  Ping Favorites'.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}e Export config")
+              f"\n  {'pf  Ping Favorites'.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}{'e   Export config'.ljust(c)}l   Log fullscreen")
 
     print_main()
 
@@ -1799,6 +1868,10 @@ def show_node_info(iface):
             if choice == "i":
                 clear_screen()
                 show_inflow_view(iface)
+                print_main()
+                continue
+            if choice == "l":
+                show_log_fullscreen()
                 print_main()
                 continue
             if choice[:2] == "rt":

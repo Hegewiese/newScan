@@ -119,6 +119,7 @@ Nodes can be added to the favorites list independently of what the radio has mar
 | `rt<n>` | Repeated traceroute at a chosen interval |
 | `pf` | Ping all favorites via NodeInfo request |
 | `i` | Inflow View — live relay traffic dashboard |
+| `l` | Toggle log fullscreen (press `l` again to return) |
 | `e` | Export node config to JSON |
 | Enter | Quit (asks for confirmation) |
 
@@ -214,6 +215,8 @@ Appended to `newscan.log` in the project directory (excluded from git).
 `◀◀` lines render in bright white (incoming); `▶▶` lines render in dim (outgoing).
 
 Relay nodes are resolved to full names where known (`via Alice` instead of `via !..07`). Own node packets are not logged.
+
+The last 8 log lines are always visible as a pinned footer at the bottom of the terminal. Press `l` from the main view to expand the log to full-screen (shows the last ~terminal-height lines, refreshes every second). Press `l` again to return to the normal view.
 
 ---
 
