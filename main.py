@@ -73,7 +73,7 @@ if sys.prefix == sys.base_prefix:
             os.execv(_venv_python, [_venv_python] + sys.argv)
 
 # ---------------------------------------------------------------------------
-# Auto-update check via git (startup)
+# Auto-update check via git
 # ---------------------------------------------------------------------------
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _git_exe = shutil.which("git")
@@ -105,55 +105,22 @@ if _git_exe and not os.environ.get("_NEWSCAN_UPDATED"):
             _upd_log.info(
                 f"Update available — local: {_local_rev[:8]}  remote: {_remote_rev[:8]}"
             )
-
-            # fetch commit list: null-delimited records of "hash\x1fsubject\x1fbody"
-            _log_raw = subprocess.check_output(
-                [_git_exe, "-C", _REPO_DIR, "log",
-                 "HEAD..origin/main", "--format=%h\x1f%s\x1f%b\x00"],
-                text=True,
-            )
-            _commits = []
-            for _rec in _log_raw.split("\x00"):
-                _rec = _rec.strip()
-                if not _rec:
-                    continue
-                _parts = _rec.split("\x1f", 2)
-                _commits.append({
-                    "hash":    _parts[0].strip() if len(_parts) > 0 else "?",
-                    "subject": _parts[1].strip() if len(_parts) > 1 else "",
-                    "body":    _parts[2].strip() if len(_parts) > 2 else "",
-                })
-            _n_commits = len(_commits)
-            _DIVIDER = "  " + "─" * 62
-
-            def _print_commit_list():
-                print(f"\nUpdate available — {_n_commits} commit{'s' if _n_commits != 1 else ''} ahead on GitHub.")
-                print(_DIVIDER)
-                _shown = min(_n_commits, 8)
-                for _i, _c in enumerate(_commits[:_shown]):
-                    print(f"  {_i + 1}  {_c['hash']}  {_c['subject']}")
-                if _n_commits > 8:
-                    print(f"  ... and {_n_commits - 8} more")
-                print(_DIVIDER)
-
-            _print_commit_list()
-
             _UPDATE_TIMEOUT = 5
             _stop_upd_cd = threading.Event()
-            _expand_hint = f"[1-{min(_n_commits, 8)}] expand  " if _n_commits > 0 else ""
 
             def _update_countdown():
                 for _secs in range(_UPDATE_TIMEOUT, 0, -1):
                     if _stop_upd_cd.is_set():
                         return
                     sys.stdout.write(
-                        f"\r  {_expand_hint}[Y] pull  [n] skip  (auto-yes in {_secs}s): "
+                        f"\r  Pull latest from GitHub? [Y/n]:  (auto-yes in {_secs}s) "
                     )
                     sys.stdout.flush()
                     _stop_upd_cd.wait(1)
 
+            print("Update available: a newer version exists on GitHub.")
             sys.stdout.write(
-                f"  {_expand_hint}[Y] pull  [n] skip  (auto-yes in {_UPDATE_TIMEOUT}s): "
+                f"  Pull latest from GitHub? [Y/n]:  (auto-yes in {_UPDATE_TIMEOUT}s) "
             )
             sys.stdout.flush()
 
@@ -169,23 +136,6 @@ if _git_exe and not os.environ.get("_NEWSCAN_UPDATED"):
                 _upd_ans = sys.stdin.readline().strip().lower()
             else:
                 _upd_ans = ""
-
-            # expand loop — runs only if user types a digit; no countdown after first prompt
-            while _upd_ans.isdigit() and 1 <= int(_upd_ans) <= min(_n_commits, 8):
-                _ci = int(_upd_ans) - 1
-                _c  = _commits[_ci]
-                print(f"\n  ── commit {_ci + 1}/{_n_commits} {'─' * 47}")
-                print(f"  {_c['hash']}  {_c['subject']}")
-                if _c["body"]:
-                    print()
-                    for _line in _c["body"].splitlines():
-                        print(f"  {_line}")
-                else:
-                    print("  (no further details)")
-                print(f"  {'─' * 62}")
-                sys.stdout.write(f"  {_expand_hint}[Y] pull  [n] skip: ")
-                sys.stdout.flush()
-                _upd_ans = sys.stdin.readline().strip().lower()
 
             if _upd_ans == "n":
                 _upd_log.info("Update declined by user — continuing with current version.")
@@ -1303,23 +1253,12 @@ def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
 
     print()
     done.wait(timeout=1)
-
-    # log whether sendTraceRoute() itself succeeded or threw
-    if result["ok"] is True:
-        log.debug(f"tracer send OK to {name} ({node_id})")
-    elif result["ok"] is False:
-        log.warning(f"tracer send FAILED to {name} ({node_id}): {result['error']}")
-
     pkt_evt.wait(timeout=2)  # let the pub/sub thread deliver the packet
-
-    # one extra tick to catch packets arriving right at the boundary
-    if captured[0] is None:
-        pkt_evt.wait(timeout=1)
 
     try:
         pub.unsubscribe(_on_tracer, "meshtastic.receive.traceroute")
-    except Exception as e:
-        log.debug(f"tracer pub.unsubscribe error (ignored): {e}")
+    except Exception:
+        pass
 
     if captured[0] is not None:
         # Received the route response — this is success regardless of whether
@@ -1328,7 +1267,7 @@ def _tracer_with_bar(iface, node_id, hop_limit, name="?"):
         return True, None
 
     if result["ok"] is False:
-        return False, f"send error: {result['error']}"
+        return False, result["error"]
 
     return False, f"timed out after {TRACEROUTE_TIMEOUT}s"
 
@@ -1345,56 +1284,14 @@ def tracer_node(iface, node_id, name):
     print(f"\n{_LB}  tracer to {name}{_RST}")
     hop_str = input("  Hop limit [3]: ").strip()
     hop_limit = int(hop_str) if hop_str.isdigit() and 1 <= int(hop_str) <= 7 else 3
-
-    # -- snapshot context before sending -------------------------------------
-    dest_num = None
-    if isinstance(node_id, int):
-        dest_num = node_id
-    elif isinstance(node_id, str) and node_id.startswith("!"):
-        try:
-            dest_num = int(node_id[1:], 16)
-        except ValueError:
-            pass
-
-    ctx_parts = []
-    if dest_num is not None:
-        dest_node = ((getattr(iface, "nodesByNum", None) or {}).get(dest_num) or {})
-        lh = dest_node.get("lastHeard")
-        if lh:
-            age_s = int(time.time() - lh)
-            age_str = f"{age_s // 60}m{age_s % 60:02d}s" if age_s >= 60 else f"{age_s}s"
-            ctx_parts.append(f"lastHeard={age_str}ago")
-        hops = dest_node.get("hopsAway")
-        if hops is not None:
-            ctx_parts.append(f"hopsAway={hops}")
-            if hop_limit <= hops:
-                log.warning(
-                    f"tracer to {name}: hop_limit={hop_limit} <= known hopsAway={hops} "
-                    f"— back-route may have no hops left; consider a higher limit"
-                )
-        snr = dest_node.get("snr")
-        if snr is not None:
-            ctx_parts.append(f"snr={snr}dB")
-
-    my_num = iface.myInfo.my_node_num
-    my_node = ((getattr(iface, "nodesByNum", None) or {}).get(my_num) or {})
-    metrics = my_node.get("deviceMetrics", {})
-    air_tx  = metrics.get("airUtilTx")
-    ch_util = metrics.get("channelUtilization")
-    if air_tx  is not None: ctx_parts.append(f"airTx={air_tx:.1f}%")
-    if ch_util is not None: ctx_parts.append(f"chUtil={ch_util:.1f}%")
-
-    ctx_str = f"  [{', '.join(ctx_parts)}]" if ctx_parts else ""
-    # -------------------------------------------------------------------------
-
-    log.info(f"tracer to {name} ({node_id}), hop_limit={hop_limit}{ctx_str}")
+    log.info(f"{_TX}▶▶ tracer to {name} ({node_id}), hop_limit={hop_limit}{_RST}")
     print()
     success, err = _tracer_with_bar(iface, node_id, hop_limit, name=name)
     if success:
-        log.info(f"tracer to {name} ({node_id}) completed successfully")
+        log.info(f"{_RX}◀◀ tracer to {name} ({node_id}) completed successfully{_RST}")
         print(f"{_LB}  Done.{_RST}")
     else:
-        log.error(f"tracer to {name} ({node_id}) failed: {err}{ctx_str}")
+        log.error(f"{_RX}◀◀ tracer to {name} ({node_id}) failed: {err}{_RST}")
         print(f"{_LB}  Failed: {err}{_RST}")
 
 
@@ -2040,41 +1937,6 @@ def show_node_info(iface):
     threading.Thread(target=_fw_check_worker, daemon=True).start()
 
     # ── main display / command loop ───────────────────────────────────────
-    _SPARKS = "▁▂▃▄▅▆▇█"
-
-    def _render_fav_row(i, node_id, p):
-        name     = _peer_name(p).ljust(name_w)
-        last     = _ago(p.get("lastHeard"))
-        snr_val  = p.get("snr")
-        hops     = p.get("hopsAway")
-        hops_str = "direct" if hops == 0 else f"{hops} hop{'s' if hops != 1 else ''}" if hops is not None else "N/A"
-        if snr_val is not None:
-            if   snr_val >  5:  _sc, _dd = "\033[32m",  "●●●●"
-            elif snr_val >  0:  _sc, _dd = "\033[92m",  "●●●○"
-            elif snr_val > -10: _sc, _dd = "\033[33m",  "●●○○"
-            else:               _sc, _dd = "\033[31m",  "●○○○"
-        else:
-            _sc, _dd = "\033[90m", "○○○○"
-        sig_dots = f"{_sc}{_dd}\033[0m"
-        node_num = node_id if isinstance(node_id, int) else int(str(node_id).lstrip("!"), 16)
-        with _inflow_lock:
-            hist = list(_node_snr_history.get(node_num, []))
-        if len(hist) < 2:
-            snr_spark = "\033[90m" + "·" * 8 + "\033[0m"
-        else:
-            lo, hi = min(hist), max(hist)
-            spread  = hi - lo
-            if spread == 0:
-                chars = "▄" * len(hist) + "·" * (8 - len(hist))
-            else:
-                chars = "".join(_SPARKS[min(int((v - lo) / spread * 8), 7)] for v in hist)
-                chars = chars.ljust(8, "·")
-            col = "\033[32m" if spread < 3 else "\033[33m" if spread < 7 else "\033[31m"
-            snr_spark = f"{col}{chars}\033[0m"
-        snr_str = f"{snr_val:>+5.1f}dB" if snr_val is not None else "     N/A"
-        pdot = (f"{_GREEN}●{_RESET}" if ping_results[node_id] else f"{_ORANGE}●{_RESET}") if node_id in ping_results else " "
-        return f"  [{i:02d}] {pdot} {name}  {last:<12}  {sig_dots} {snr_spark}  {snr_str}   {hops_str}"
-
     def print_main():
         clear_screen()
         _bat_lvl = ((getattr(iface, "nodesByNum", None) or {}).get(my_num) or {}).get("deviceMetrics", {}).get("batteryLevel")
@@ -2086,8 +1948,41 @@ def show_node_info(iface):
             print("\nNo favorite nodes visible yet.")
             return
         print(f"\nFavorite peers: {len(favorites)} of {len(all_peers)} visible\n")
+        _SPARKS = "▁▂▃▄▅▆▇█"
         for i, (node_id, p) in enumerate(favorites, 1):
-            print(_render_fav_row(i, node_id, p))
+            name    = _peer_name(p).ljust(name_w)
+            last    = _ago(p.get("lastHeard"))
+            snr_val = p.get("snr")
+            hops    = p.get("hopsAway")
+            hops_str = "direct" if hops == 0 else f"{hops} hop{'s' if hops != 1 else ''}" if hops is not None else "N/A"
+            # signal dots
+            if snr_val is not None:
+                if   snr_val >  5:  _sc, _dd = "\033[32m",  "●●●●"
+                elif snr_val >  0:  _sc, _dd = "\033[92m",  "●●●○"
+                elif snr_val > -10: _sc, _dd = "\033[33m",  "●●○○"
+                else:               _sc, _dd = "\033[31m",  "●○○○"
+            else:
+                _sc, _dd = "\033[90m", "○○○○"
+            sig_dots = f"{_sc}{_dd}\033[0m"
+            # sparkline from per-node SNR history
+            node_num = node_id if isinstance(node_id, int) else int(str(node_id).lstrip("!"), 16)
+            with _inflow_lock:
+                hist = list(_node_snr_history.get(node_num, []))
+            if len(hist) < 2:
+                snr_spark = "\033[90m" + "·" * 8 + "\033[0m"
+            else:
+                lo, hi = min(hist), max(hist)
+                spread = hi - lo
+                if spread == 0:
+                    chars = "▄" * len(hist) + "·" * (8 - len(hist))
+                else:
+                    chars = "".join(_SPARKS[min(int((v - lo) / spread * 8), 7)] for v in hist)
+                    chars = chars.ljust(8, "·")
+                col = "\033[32m" if spread < 3 else "\033[33m" if spread < 7 else "\033[31m"
+                snr_spark = f"{col}{chars}\033[0m"
+            snr_str = f"{snr_val:>+5.1f}dB" if snr_val is not None else "     N/A"
+            pdot = (f"{_GREEN}●{_RESET}" if ping_results[node_id] else f"{_ORANGE}●{_RESET}") if node_id in ping_results else " "
+            print(f"  [{i}] {pdot} {name}  {last:<12}  {sig_dots} {snr_spark}  {snr_str}   {hops_str}")
         c = 22
         print(f"\n  {'d<n> Node Details'.ljust(c)}{'m<n> Message'.ljust(c)}{'t<n> tracer'.ljust(c)}{'i   Inflow View'.ljust(c)}Enter to quit"
               f"\n  {'pf  Ping Favorites'.ljust(c)}{'r<n> Repeat msg'.ljust(c)}{'rt<n> Repeat trace'.ljust(c)}{'e   Export config'.ljust(c)}l   Log fullscreen")
