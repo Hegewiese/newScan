@@ -17,7 +17,7 @@ A terminal-based tool to discover, connect to, and communicate with [Meshtastic]
 - **Node details** — ID, short name, hardware, last seen, SNR, RSSI, hops, GPS, battery, voltage, telemetry
 - **Send message** — single or repeated at a configurable interval; after each send the **Outbound View** opens automatically (see below)
 - **Outbound View** — live routing-journey screen shown after every DM: last-known route visualisation (or hop-count if not yet traced), relay echo detection, ACK return path with SNR/RSSI/hop count and inferred next-hop node; updates every second until Enter is pressed
-- **Tracer** — single or repeated traceroute with live progress bar; full route + per-hop SNR logged; result cached so Outbound View can display it for subsequent messages
+- **Tracer** — single or repeated traceroute with live progress bar; full route + per-hop SNR logged; result cached so Outbound View can display it for subsequent messages; pre-send diagnostics (last seen, hops away, SNR, channel utilisation) logged on every attempt, and a warning emitted when `hop_limit` is too low to carry the back-route
 - **Inflow View** — live session dashboard grouped by relay/via node: packet counts per type, unique source node count, avg SNR/RSSI of the last-hop link, battery level, time since last packet; stale relays dimmed after 5 min silence; press `e` to expand per-relay source node list
 - **Config export** — `localConfig`, `moduleConfig`, and channels to a timestamped JSON file
 - **Live log footer** — last 8 lines of `newscan.log` always visible at the bottom of the terminal
@@ -62,9 +62,20 @@ python main.py
 ### Startup flow
 
 1. Requirements check (platform / Python / venv / Bluetooth)
-2. Known paired devices listed (Linux); full BLE scan if none found
-3. Select device → spinner while connecting
-4. Main view appears; firmware check runs in background and updates the header
+2. **Auto-update check** — fetches `origin/main`; if commits are pending, shows a numbered list with a 5 s auto-yes countdown:
+   ```
+   Update available — 3 commits ahead on GitHub.
+     ──────────────────────────────────────────────────────────────
+     1  a3f1c9e  Traceroute: pre-send context logging + race fix
+     2  d7b22a1  Inflow view: SNR sparkline trend column
+     3  e60bf9a  Main view: signal dots + SNR sparkline per favorite
+     ──────────────────────────────────────────────────────────────
+     [1-3] expand  [Y] pull  [n] skip  (auto-yes in 5s):
+   ```
+   Type a number to expand that commit's full message, then `Y`/Enter to pull and restart, or `n` to skip.
+3. Known paired devices listed (Linux); full BLE scan if none found
+4. Select device → spinner while connecting
+5. Main view appears; firmware check runs in background and updates the header
 
 ### Main view
 
