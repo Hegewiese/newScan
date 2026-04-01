@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Meshtastic BLE scanner — discover devices and connect to one.
-Copyright by Hegewiese
+Copyright by me
 """
 
 import json
@@ -73,7 +73,7 @@ if sys.prefix == sys.base_prefix:
             os.execv(_venv_python, [_venv_python] + sys.argv)
 
 # ---------------------------------------------------------------------------
-# Auto-update check via git (cross-platform)
+# Auto-update check via git
 # ---------------------------------------------------------------------------
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _git_exe = shutil.which("git")
@@ -106,14 +106,14 @@ if _git_exe and not os.environ.get("_NEWSCAN_UPDATED"):
                 f"Update available — local: {_local_rev[:8]}  remote: {_remote_rev[:8]}"
             )
 
-            # fetch commit list: records of "hash\x1fsubject\x1fbody" separated by sentinel
-            _REC_SEP = "---REC---"
+            # fetch commit list: null-delimited records of "hash\x1fsubject\x1fbody"
             _log_raw = subprocess.check_output(
                 [_git_exe, "-C", _REPO_DIR, "log",
-                 "HEAD..origin/main", f"--format=%h\x1f%s\x1f%b{_REC_SEP}"],
-            ).decode("utf-8", errors="replace")
+                 "HEAD..origin/main", "--format=%h\x1f%s\x1f%b\x00"],
+                text=True,
+            )
             _commits = []
-            for _rec in _log_raw.split(_REC_SEP):
+            for _rec in _log_raw.split("\x00"):
                 _rec = _rec.strip()
                 if not _rec:
                     continue
