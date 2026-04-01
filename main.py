@@ -73,7 +73,7 @@ if sys.prefix == sys.base_prefix:
             os.execv(_venv_python, [_venv_python] + sys.argv)
 
 # ---------------------------------------------------------------------------
-# Auto-update check via git
+# Auto-update check via git (startup)
 # ---------------------------------------------------------------------------
 _REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 _git_exe = shutil.which("git")
