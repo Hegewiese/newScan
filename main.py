@@ -110,8 +110,7 @@ if _git_exe and not os.environ.get("_NEWSCAN_UPDATED"):
             _log_raw = subprocess.check_output(
                 [_git_exe, "-C", _REPO_DIR, "log",
                  "HEAD..origin/main", "--format=%h\x1f%s\x1f%b\x00"],
-                text=True,
-            )
+            ).decode("utf-8", errors="replace")
             _commits = []
             for _rec in _log_raw.split("\x00"):
                 _rec = _rec.strip()
