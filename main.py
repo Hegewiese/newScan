@@ -106,13 +106,14 @@ if _git_exe and not os.environ.get("_NEWSCAN_UPDATED"):
                 f"Update available — local: {_local_rev[:8]}  remote: {_remote_rev[:8]}"
             )
 
-            # fetch commit list: null-delimited records of "hash\x1fsubject\x1fbody"
+            # fetch commit list: records of "hash\x1fsubject\x1fbody" separated by sentinel
+            _REC_SEP = "---REC---"
             _log_raw = subprocess.check_output(
                 [_git_exe, "-C", _REPO_DIR, "log",
-                 "HEAD..origin/main", "--format=%h\x1f%s\x1f%b\x00"],
+                 "HEAD..origin/main", f"--format=%h\x1f%s\x1f%b{_REC_SEP}"],
             ).decode("utf-8", errors="replace")
             _commits = []
-            for _rec in _log_raw.split("\x00"):
+            for _rec in _log_raw.split(_REC_SEP):
                 _rec = _rec.strip()
                 if not _rec:
                     continue
