@@ -614,6 +614,7 @@ def start_message_log(iface) -> None:
                     _inflow_data[key] = {
                         "name": key, "node_num": relay_num, "total": 0,
                         "text": 0, "position": 0, "user": 0,
+                        "first_ts": time.time(),
                         "telemetry": 0, "neighborinfo": 0, "traceroute": 0,
                         "snr_sum": 0.0, "rssi_sum": 0, "sig_count": 0,
                         "snr_history": [],
@@ -1673,7 +1674,8 @@ def show_inflow_view(iface):
     _stop = threading.Event()
     BAR_W = 20
 
-    _expanded = [False]
+    _expanded   = [False]
+    _show_first = [False]
 
     def _render():
         with _inflow_lock:
@@ -1688,7 +1690,8 @@ def show_inflow_view(iface):
                f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
                f"(session {elapsed_str})")
         sep = "  " + "─" * 126
-        hdr = (f"  {'Last Hop':<22}  {'Hops Out':>8}  {'Dist':>6}  {'last':>6}  {'src':>4}  {'Pkts':>5}  {'':<{BAR_W}}  "
+        ts_col = "first" if _show_first[0] else "last"
+        hdr = (f"  {'Last Hop':<22}  {'Hops Out':>8}  {'Dist':>6}  {ts_col:>6}  {'src':>4}  {'Pkts':>5}  {'':<{BAR_W}}  "
                f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  "
                f"{'':>5} {'trend':>8} {'SNR':>6} {'RSSI':>6}  {'batt':>5}")
 
@@ -1705,7 +1708,7 @@ def show_inflow_view(iface):
             name     = d["name"][:22].ljust(22)
             types    = (f"{d['text']:>3} {d['position']:>3} {d['user']:>3} "
                         f"{d['telemetry']:>3} {d['neighborinfo']:>3} {d['traceroute']:>3}")
-            ago_s    = int(time.time() - d["last_ts"])
+            ago_s    = int(time.time() - (d["first_ts"] if _show_first[0] else d["last_ts"]))
             ago_str  = f"{ago_s // 60}m{ago_s % 60:02d}s" if ago_s >= 60 else f"{ago_s}s"
             sc = d["sig_count"]
             snr_val  = d['snr_sum']  / sc if sc else None
@@ -1776,7 +1779,8 @@ def show_inflow_view(iface):
             lines.append("  (no packets received yet — waiting...)")
 
         e_hint = "collapse sources" if _expanded[0] else "expand sources"
-        lines += [sep, "", f"  Press Enter to return  |  [e] {e_hint}"]
+        f_hint = "show last seen" if _show_first[0] else "show first seen"
+        lines += [sep, "", f"  Press Enter to return  |  [e] {e_hint}  |  [f] {f_hint}"]
         return lines
 
     def _refresh_worker():
@@ -1815,6 +1819,9 @@ def show_inflow_view(iface):
                 break
             elif ch.lower() == 'e':
                 _expanded[0] = not _expanded[0]
+                _push_refresh()
+            elif ch.lower() == 'f':
+                _show_first[0] = not _show_first[0]
                 _push_refresh()
     finally:
         termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
