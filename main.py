@@ -1689,11 +1689,11 @@ def show_inflow_view(iface):
         h1  = (f"  Inflow View  —  {total_pkts} packet{'s' if total_pkts != 1 else ''} "
                f"from {len(rows_data)} node{'s' if len(rows_data) != 1 else ''}  "
                f"(session {elapsed_str})")
-        sep = "  " + "─" * 126
+        sep = "  " + "─" * 142
         ts_col = "first" if _show_first[0] else "last"
         hdr = (f"  {'Last Hop':<22}  {'Hops Out':>8}  {'Dist':>6}  {ts_col:>6}  {'src':>4}  {'Pkts':>5}  {'':<{BAR_W}}  "
                f"{'txt':>3} {'pos':>3} {'usr':>3} {'tel':>3} {'nb':>3} {'tr':>3}  "
-               f"{'':>5} {'trend':>8} {'SNR':>6} {'RSSI':>6}  {'batt':>5}")
+               f"{'':>5} {'trend':>8} {'SNR':>6} {'RSSI':>6}  {'batt':>5}  {'chUtil':>6}  {'airTx':>6}")
 
         lines = [h1, sep, hdr, sep]
 
@@ -1726,7 +1726,8 @@ def show_inflow_view(iface):
             relay_num = d.get("node_num")
             hops = nodes_by_num.get(relay_num, {}).get("hopsAway") if relay_num else None
             hops_str = "dir" if hops == 0 else f"{hops}h" if hops is not None else "—"
-            batt = nodes_by_num.get(relay_num, {}).get("deviceMetrics", {}).get("batteryLevel") if relay_num else None
+            dm   = nodes_by_num.get(relay_num, {}).get("deviceMetrics", {}) if relay_num else {}
+            batt = dm.get("batteryLevel")
             if batt is None:
                 batt_display = "\033[90m    —\033[0m"
             elif batt > 100:
@@ -1737,6 +1738,15 @@ def show_inflow_view(iface):
                 batt_display = f"\033[33m{batt:>4}%\033[0m"
             else:
                 batt_display = f"\033[31m{batt:>4}%\033[0m"
+            def _util_str(val):
+                if val is None:
+                    return "\033[90m    —\033[0m"
+                if   val >= 50: col = "\033[31m"
+                elif val >= 25: col = "\033[33m"
+                else:           col = "\033[32m"
+                return f"{col}{val:>4.1f}%\033[0m"
+            ch_display  = _util_str(dm.get("channelUtilization"))
+            air_display = _util_str(dm.get("airUtilTx"))
             relay_pos = _node_pos(nodes_by_num.get(relay_num)) if relay_num else None
             if my_pos and relay_pos:
                 km = _haversine(*my_pos, *relay_pos)
@@ -1759,7 +1769,7 @@ def show_inflow_view(iface):
                 col = "\033[32m" if spread < 3 else "\033[33m" if spread < 7 else "\033[31m"
                 snr_spark = f"{col}{chars}\033[0m"
             lines.append(f"{dim}  {name}  {hops_str:>8}  {dist_str:>6}  {ago_str:>6}  {d['src_count']:>2} {spark}  {d['total']:>5}  {bar}  {types}  "
-                         f"{sig_dots}{dim} {snr_spark} {snr_str}dB {rssi_str}dBm  {batt_display}")
+                         f"{sig_dots}{dim} {snr_spark} {snr_str}dB {rssi_str}dBm  {batt_display}  {ch_display}  {air_display}")
             if _expanded[0] and d["sources"]:
                 sorted_srcs = sorted(d["sources"].items(), key=lambda x: x[1], reverse=True)
                 MAX_SHOWN = 8
